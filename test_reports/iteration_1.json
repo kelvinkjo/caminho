@@ -1,0 +1,32 @@
+{
+  "summary": "Comprehensive backend + frontend testing for CAMINHO (auth, stage security, formation progress, approval flow, formador radar, admin). Backend: 17 passed / 1 skipped (skip is expected because membro was advanced to stage 4 by the approval-flow test, so no higher seeded stage remains to test lesson-block for that user). Frontend: all critical flows verified (membro login+dashboard+journey+stage detail+lesson player, formador Minhas Pessoas with radar, admin Administração with stats+chart+user management).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Admin.js option elements", "issues": ["React hydration warning: '<span> cannot be a child of <option>'. Caused by injected element-tagging wrappers inside <option> children in Admin.js line ~67. Non-blocking (selects still work) but pollutes console. Consider wrapping option text so tagging system does not inject spans inside <option>."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Optional: silence React hydration warning caused by <span> inside <option> in Admin.js (visual/console noise only)."
+  ],
+  "critical_code_review_comments": [
+    "seed() also updates admin password on every startup if it doesn't match ADMIN_PASSWORD - good idempotence.",
+    "GET /api/stages/{order}/modules returns lessons list correctly. Access check is correct: admin/formador bypass, members blocked when order > current_stage_order.",
+    "Consider using a startup lifespan handler; @app.on_event('startup') is deprecated in newer FastAPI versions.",
+    "server.py is ~577 lines - approaching the 700-line threshold; consider splitting into routers (auth, stages, approvals, admin) as it grows."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100% (17/17 executed; 1 skipped by design)", "frontend": "100%"},
+  "seed_data_creation": "Used seeded users only (admin/formador/membro). Approval flow test advanced membro@caminho.app from stage 3 -> 4 permanently, as anticipated in the review request. Missions completion state also persisted for membro.",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "admin: kelvinjose.oliveira@gmail.com / ***REMOVED*** | formador: formador@caminho.app / ***REMOVED*** | membro: membro@caminho.app / ***REMOVED*** (now at stage 4 after approval test)",
+  "context_for_next_testing_agent": "Backend endpoints all working. Membro is now at stage 4 (advanced by approval test). To re-test the full approval flow, either: (a) reset membro to stage 3 in Mongo, or (b) simply rerun - test dynamically reads current_stage_order and completes/requests approval for whatever stage they're on (advances further, up to 6). Test file /app/backend/tests/backend_test.py contains full pytest suite with fixtures. Frontend Playwright coverage: login, dashboard, journey (6 stages), stage detail with lessons, lesson player with complete button, Perfil -> Minhas Pessoas (radar OK, João visible with green dot), Perfil -> Administração (stats 3 members/0 pending/1 formador, bar chart svg, 3 user cards each with role-select, stage-select and formador select, Bloquear button). Note the hydration warning in Admin.js from injected spans inside <option>.",
+  "rca_of_the_issue": "N/A - no functional issues found. The only console warning is a hydration issue caused by dev-tooling wrappers being injected as <span> inside native <option> elements in Admin.js; browsers still render options correctly and selects function as expected."
+}

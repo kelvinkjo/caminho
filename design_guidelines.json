@@ -1,0 +1,164 @@
+{
+  "project_name": "CAMINHO",
+  "theme_mode": "dark",
+  "design_philosophy": {
+    "core_emotion": "I belong, I am growing, I have a mission. A spiritual arc from Encontro to Entrega.",
+    "aesthetic": "Modern, young, strong, spiritual, elegant, minimalist. Deep dark mode with fiery warm accents. Avoids childish visuals, excessive gold, and old institutional layouts.",
+    "anti_patterns": [
+      "No generic AI-slop purple/blue gradients.",
+      "No pure black (#000000) backgrounds; use tinted warm darks.",
+      "No heavy drop shadows; rely on 1px borders and subtle glows.",
+      "No centered default text alignments; use intentional left-alignment for reading flow.",
+      "No default Roboto/Inter for headings."
+    ]
+  },
+  "typography": {
+    "headings": {
+      "family": "Outfit, sans-serif",
+      "weight": "font-bold to font-black",
+      "usage": "H1 to H4. Used for stage names, module titles, and main greetings.",
+      "tracking": "tracking-tight"
+    },
+    "body": {
+      "family": "Plus Jakarta Sans, sans-serif",
+      "weight": "font-normal to font-medium",
+      "usage": "Paragraphs, UI labels, buttons, navigation.",
+      "tracking": "tracking-normal"
+    },
+    "spiritual_accent": {
+      "family": "Cormorant Garamond, serif",
+      "weight": "font-medium italic",
+      "usage": "Exclusively for 'Palavra do Dia' (Word of the Day), biblical quotes, and spiritual reflections. Adds an elegant, grounded liturgical feel.",
+      "tracking": "tracking-wide"
+    }
+  },
+  "colors": {
+    "background": {
+      "base": "#0C0A09",
+      "tailwind": "bg-stone-950",
+      "description": "Deep void with a very subtle warm earthy tint. Evokes a night vigil."
+    },
+    "surface": {
+      "primary": "#1C1917",
+      "tailwind": "bg-stone-900",
+      "description": "Main card and container background."
+    },
+    "surface_secondary": {
+      "primary": "#292524",
+      "tailwind": "bg-stone-800",
+      "description": "Elevated elements, hover states."
+    },
+    "brand_accent": {
+      "primary": "#EA580C",
+      "tailwind": "text-orange-600 / bg-orange-600",
+      "hover": "#F97316",
+      "description": "The 'Fire/Holy Spirit' accent. Used for primary CTAs, active journey nodes, and progress bars. A void dark theme with this vivid fiery orange creates a strong, young, missionary feel without using gold."
+    },
+    "text": {
+      "primary": "#FAFAF9",
+      "tailwind": "text-stone-50",
+      "secondary": "#A8A29E",
+      "tailwind": "text-stone-400"
+    },
+    "status": {
+      "success_green": "#16A34A",
+      "warning_yellow": "#EAB308",
+      "danger_red": "#DC2626",
+      "usage": "Used strictly for the Formador Pastoral Radar and 'Aguardando Avaliação' (Awaiting Approval) states."
+    },
+    "borders": {
+      "subtle": "border-stone-800",
+      "active": "border-orange-600/50"
+    }
+  },
+  "visual_enhancers": {
+    "textures": "Apply a highly subtle SVG noise/grain overlay (`opacity-5` or `opacity-10` max) fixed to the background to remove digital flatness and make it feel like 'stone' or 'earth'.",
+    "lighting": "Instead of gradients, use subtle radial glows behind active elements (e.g., `bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-orange-900/20 to-transparent`).",
+    "borders": "Always use `border border-stone-800` on cards (`bg-stone-900`) to define edges against the `bg-stone-950` background.",
+    "glassmorphism": "Used ONLY for the sticky bottom navigation and sticky headers: `backdrop-blur-xl bg-stone-950/80 border-t border-stone-800`."
+  },
+  "responsive": {
+    "breakpoint": "Mobile-first strictly. Design for 375px - 430px width primarily, scaling up to tablet/desktop.",
+    "layout": "Vertical stacking. Use `flex-col` with generous gaps (`gap-6`, `gap-8`).",
+    "typography": "Fluid or scalable text sizes. H1 at `text-3xl` on mobile, scaling to `text-5xl` on md+.",
+    "overflow_guard": "Ensure `overflow-x-hidden` on main container to prevent horizontal scrolling on small screens.",
+    "tap_targets": "All interactive elements must be minimum `min-h-[44px]` or `min-h-[48px]` for comfortable thumb tapping."
+  },
+  "layouts_and_grids": {
+    "dashboard": "Mobile Bento Grid. 1 column layout. High priority to 'Palavra do Dia' (serif font) at the top, followed by 'Continue sua jornada' card, and upcoming events.",
+    "journey_map": "A vertical winding timeline. Nodes are staggered left and right (or straight vertical with an offset line on mobile). Nodes are connected by a vertical SVG line.",
+    "formador_radar": "List view with explicit color-coded badges (Green/Yellow/Red) representing the pastoral state of the youth.",
+    "spacing": "Generous. Use `p-6` or `p-8` inside major cards. `gap-6` between vertical sections."
+  },
+  "components": {
+    "bottom_navigation": {
+      "style": "Fixed at bottom `bottom-0 left-0 right-0 z-50`. Glassmorphism surface.",
+      "items": "Início, Jornada, Formação, Lives, Perfil.",
+      "active_state": "Icon + Label in `text-orange-500`. Inactive in `text-stone-500`."
+    },
+    "journey_node": {
+      "states": {
+        "locked": "Icon only, greyed out (`text-stone-600 bg-stone-900 border-stone-800`).",
+        "current": "Pulsing amber glow, colored icon (`text-orange-500 border-orange-500 bg-orange-500/10 shadow-[0_0_15px_rgba(234,88,12,0.2)]`).",
+        "completed": "Solid orange fill (`bg-orange-600 text-stone-50 border-orange-500`).",
+        "awaiting_approval": "Yellow accent (`border-yellow-500 text-yellow-500 bg-yellow-500/10`)."
+      }
+    },
+    "lesson_player": {
+      "style": "Clean video placeholder/container at top (aspect-video, rounded-xl), followed by tabbed content (Lesson info, Activities, Evaluation)."
+    },
+    "buttons": {
+      "primary": "Pill-shaped (`rounded-full`) or highly rounded (`rounded-xl`). Solid `bg-orange-600 hover:bg-orange-500 text-white transition-colors duration-200`."
+    }
+  },
+  "motion": {
+    "page_transitions": "Fade in and slight upward translation (`translate-y-2` to `translate-y-0`) on enter.",
+    "interactions": "Scale down slightly on button active/press (`active:scale-95`).",
+    "journey_progress": "Animate the height/width of the connecting line between completed nodes."
+  },
+  "media": {
+    "icons": "Use `lucide-react`. Stroke width 1.5 for elegance.",
+    "images": {
+      "worship_hero": {
+        "url": "https://images.unsplash.com/photo-1438232992991-995b7058bbb3?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA2MjJ8MHwxfHNlYXJjaHwxfHx5b3V0aCUyMHdvcnNoaXAlMjBzaWxob3VldHRlfGVufDB8fHx8MTc4NjQwMDU0MHww&ixlib=rb-4.1.0&q=85",
+        "category": "Onboarding / Hero",
+        "description": "Shallow focus photography of hands raised in worship, fits the 'youth, surrender' theme."
+      },
+      "minimalist_cross": {
+        "url": "https://images.unsplash.com/photo-1542223533-bfa1cbd335b4?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1Mjh8MHwxfHNlYXJjaHwyfHxtaW5pbWFsaXN0JTIwd29vZGVuJTIwY3Jvc3MlMjBkYXJrJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3ODY0MDA1NDB8MA&ixlib=rb-4.1.0&q=85",
+        "category": "Formation Header / Spiritual Background",
+        "description": "Minimalist illuminated cross against dark background. Elegant, not overly decorative."
+      },
+      "community_fire": {
+        "url": "https://images.unsplash.com/photo-1475483768296-6163e08872a1?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDN8MHwxfHNlYXJjaHwyfHx5b3V0aCUyMGNhbXBmaXJlJTIwbmlnaHQlMjBncm91cHxlbnwwfHx8fDE3ODY0MDA1NDB8MA&ixlib=rb-4.1.0&q=85",
+        "category": "Community Feed / Lives Thumbnail",
+        "description": "Youth sitting around a campfire at night. Symbolizes Encontro, Community, and Fire."
+      }
+    }
+  },
+  "instructions_to_main_agent": {
+    "1": "You MUST build a mobile-first interface. Assume viewport is mobile initially. Do not create wide desktop tables unless explicitly handling larger breakpoints.",
+    "2": "Create standard Shadcn components but override their styles to match the 'dark stone and fiery orange' aesthetic detailed in the colors section. Remove any default Vercal-like aesthetics.",
+    "3": "Use pure HTML/Tailwind for the visual heavy elements like the Journey Map (vertical timeline). Do not force standard UI cards where a custom visual representation works better.",
+    "4": "The 'Palavra do Dia' (Word of the Day) MUST use the `Cormorant Garamond` (or standard serif) font with italic styling to evoke a spiritual, grounded feeling.",
+    "5": "Do NOT use pure #000000. Use `bg-stone-950` as the absolute darkest background.",
+    "6": "Add `data-testid` attributes to all buttons, navigation links, and major form inputs.",
+    "7": "Do not add any fully transparent backgrounds to overlays/headers where text passes underneath. Always use `backdrop-blur` and a semi-transparent color like `bg-stone-950/80`.",
+    "8": "The app is in Brazilian Portuguese (PT-BR). All UI text you generate must be in Portuguese.",
+    "9": "Install fonts using standard Next/Google fonts or standard CSS `@import`. Outfit, Plus Jakarta Sans, and Cormorant Garamond."
+  },
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "You tend to converge toward generic, 'on distribution' outputs. Avoid this: make creative, distinctive frontends that surprise and delight.",
+    "Dark colors look good when used independently without gradients. DO NOT use dark colors as gradients.",
+    "Don't make generic centered layouts, simplistic gradients, and uniform styling.",
+    "Create depth through layered design elements with z-index hierarchy and 1px borders.",
+    "Use glass-morphism effects with backdrop filters (12-24px blur) for sticky navs.",
+    "You MUST NOT apply universal transition (e.g., transition: all). Add transitions for specific properties.",
+    "You MUST NOT center align the app container, i.e., do not add `.App { text-align: center; }` in the CSS file.",
+    "Always use modern button styles (rounded-xl or rounded-full) with interaction animations & color relevant to the app style.",
+    "NEVER use AI assistant Emoji characters (🤖🧠💭💡) for icons.",
+    "Every interaction needs micro-animations - hover states, transitions, and entrance animations.",
+    "Use 2-3x more spacing than feels comfortable. Cramped designs look cheap.",
+    "Use sonner for toasts."
+  ]
+}
