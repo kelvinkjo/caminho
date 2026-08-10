@@ -3,13 +3,37 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { Shell } from "../components/Shell";
 import { STAGE_ICONS, statusMeta } from "../lib/stages";
-import { Radio, Flame, CalendarDays, ChevronRight, Play, CheckCircle2, Loader2 } from "lucide-react";
+import { Radio, Flame, CalendarDays, ChevronRight, Play, CheckCircle2, Loader2, Search, Sparkles, BookOpen } from "lucide-react";
 
 function greeting() {
   const h = new Date().getHours();
   if (h < 12) return "Bom dia";
   if (h < 18) return "Boa tarde";
   return "Boa noite";
+}
+
+function Recommendations({ nav }) {
+  const [rec, setRec] = useState(null);
+  useEffect(() => { api.get("/recommendations").then((r) => setRec(r.data)).catch(() => setRec(false)); }, []);
+  if (!rec) return null;
+  return (
+    <section data-testid="recommendations" className="rounded-2xl border border-orange-600/30 bg-stone-900 p-5">
+      <p className="text-orange-500 uppercase tracking-widest text-[11px] font-semibold mb-3 flex items-center gap-1.5"><Sparkles className="w-3.5 h-3.5" /> Para você hoje</p>
+      {rec.tip && <p className="font-serifq italic text-lg text-stone-300 leading-snug mb-3">{rec.tip}</p>}
+      <div className="space-y-2">
+        {rec.next_lesson && (
+          <button data-testid="rec-lesson" onClick={() => nav(`/app/aula/${rec.next_lesson.id}`)} className="w-full flex items-center gap-3 text-left rounded-xl bg-stone-800/60 border border-stone-800 p-3 active:scale-[0.99] transition-transform">
+            <BookOpen className="w-4 h-4 text-orange-500 shrink-0" /><span className="flex-1 text-sm truncate">Próxima aula: {rec.next_lesson.title}</span><ChevronRight className="w-4 h-4 text-stone-500" />
+          </button>
+        )}
+        {rec.mission && (
+          <button data-testid="rec-mission" onClick={() => nav("/app/missao")} className="w-full flex items-center gap-3 text-left rounded-xl bg-stone-800/60 border border-stone-800 p-3 active:scale-[0.99] transition-transform">
+            <Flame className="w-4 h-4 text-orange-500 shrink-0" /><span className="flex-1 text-sm truncate">Missão: {rec.mission.title}</span><ChevronRight className="w-4 h-4 text-stone-500" />
+          </button>
+        )}
+      </div>
+    </section>
+  );
 }
 
 export default function Dashboard() {
@@ -31,8 +55,13 @@ export default function Dashboard() {
             <p className="text-stone-500 text-sm">{greeting()},</p>
             <h1 className="font-heading font-black text-2xl tracking-tight">{d.user.name.split(" ")[0]}</h1>
           </div>
-          <div className="w-11 h-11 rounded-full bg-stone-800 border border-stone-700 flex items-center justify-center font-heading font-bold text-orange-500">
-            {d.user.name[0]}
+          <div className="flex items-center gap-3">
+            <button data-testid="header-search" onClick={() => nav("/app/busca")} className="w-11 h-11 rounded-full bg-stone-900 border border-stone-800 flex items-center justify-center text-stone-400 active:scale-95 transition-transform">
+              <Search className="w-5 h-5" />
+            </button>
+            <div className="w-11 h-11 rounded-full bg-stone-800 border border-stone-700 flex items-center justify-center font-heading font-bold text-orange-500">
+              {d.user.name[0]}
+            </div>
           </div>
         </header>
 
@@ -88,6 +117,9 @@ export default function Dashboard() {
             </div>
           </section>
         )}
+
+        {/* Recomendações IA */}
+        <Recommendations nav={nav} />
 
         {/* Missão da semana */}
         <section>

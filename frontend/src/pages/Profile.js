@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { Shell } from "../components/Shell";
-import { LogOut, Users, ShieldCheck, Flame, ChevronRight, Sparkles } from "lucide-react";
+import { LogOut, Users, ShieldCheck, Flame, ChevronRight, Sparkles, Search, ShieldQuestion } from "lucide-react";
 
 const roleLabel = { admin: "Administrador", formador: "Formador", moderador: "Moderador", membro: "Membro" };
 
@@ -28,6 +28,14 @@ export default function Profile() {
 
           <button data-testid="profile-assistente" onClick={() => nav("/app/assistente")} className="w-full flex items-center gap-3 rounded-xl border border-stone-800 bg-stone-900 p-4 active:scale-[0.99] transition-transform">
             <Sparkles className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Assistente de Formação</span><ChevronRight className="text-stone-500" />
+          </button>
+
+          <button data-testid="profile-busca" onClick={() => nav("/app/busca")} className="w-full flex items-center gap-3 rounded-xl border border-stone-800 bg-stone-900 p-4 active:scale-[0.99] transition-transform">
+            <Search className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Busca Inteligente</span><ChevronRight className="text-stone-500" />
+          </button>
+
+          <button data-testid="profile-defesa" onClick={() => nav("/app/defesa")} className="w-full flex items-center gap-3 rounded-xl border border-stone-800 bg-stone-900 p-4 active:scale-[0.99] transition-transform">
+            <ShieldQuestion className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Defesa da Fé</span><ChevronRight className="text-stone-500" />
           </button>
 
           {(user.role === "formador" || user.role === "admin") && (

@@ -249,6 +249,8 @@ async def request_approval(user: dict = Depends(get_current_user)):
     prog = await stage_progress(user["id"], order)
     if prog["percent"] < 100:
         raise HTTPException(400, "Conclua todas as aulas da etapa antes de solicitar avaliação.")
+    if await mandatory_lives_pending(user["id"], order):
+        raise HTTPException(400, "Confirme presença nas lives obrigatórias da etapa antes de solicitar avaliação.")
     if order >= 6:
         raise HTTPException(400, "Você já está na etapa final.")
     existing = await db.approvals.find_one({"user_id": user["id"], "stage_order": order, "status": "pending"})
@@ -482,6 +484,125 @@ async def assistant_history(session_id: str, user: dict = Depends(get_current_us
     msgs = await db.assistant_messages.find({"user_id": user["id"], "session_id": session_id}).sort("at", 1).to_list(100)
     return [{"role": m["role"], "text": m["text"]} for m in msgs]
 
+# ---------------- Lives (Fase 3) ----------------
+class PresenceIn(BaseModel):
+    percent: int = 0
+
+def live_accessible(live: dict, user: dict) -> bool:
+    if user["role"] in ("admin", "formador"):
+        return True
+    so = live.get("stage_order")
+    return so is None or so <= user["current_stage_order"]
+
+async def mandatory_lives_pending(user_id: str, order: int) -> bool:
+    req = await db.lives.find({"stage_order": order, "required": True}).to_list(100)
+    for l in req:
+        a = await db.live_attendance.find_one({"user_id": user_id, "live_id": l["id"], "confirmed": True})
+        if not a:
+            return True
+    return False
+
+@api.get("/lives")
+async def get_lives(user: dict = Depends(get_current_user)):
+    lives = await db.lives.find().sort("date", 1).to_list(300)
+    att = {a["live_id"]: a async for a in db.live_attendance.find({"user_id": user["id"]})}
+    buckets = {"live_now": [], "upcoming": [], "recorded": []}
+    for l in lives:
+        if not live_accessible(l, user):
+            continue
+        l.pop("_id", None)
+        a = att.get(l["id"])
+        l["presence_percent"] = a["percent"] if a else 0
+        l["presence_confirmed"] = bool(a and a.get("confirmed"))
+        key = {"live": "live_now", "upcoming": "upcoming", "recorded": "recorded"}.get(l.get("status"), "upcoming")
+        buckets[key].append(l)
+    return buckets
+
+@api.post("/lives/{lid}/presence")
+async def live_presence(lid: str, body: PresenceIn, user: dict = Depends(get_current_user)):
+    l = await db.lives.find_one({"id": lid})
+    if not l:
+        raise HTTPException(404, "Live não encontrada")
+    if not live_accessible(l, user):
+        raise HTTPException(403, "Você não tem acesso a esta live")
+    minp = l.get("min_presence", 75)
+    percent = max(0, min(100, body.percent))
+    confirmed = percent >= minp
+    await db.live_attendance.update_one(
+        {"user_id": user["id"], "live_id": lid},
+        {"$set": {"percent": percent, "confirmed": confirmed, "stage_order": l.get("stage_order"), "at": now_iso()},
+         "$setOnInsert": {"id": str(uuid.uuid4())}}, upsert=True)
+    return {"ok": True, "confirmed": confirmed, "min_presence": minp, "percent": percent}
+
+# ---------------- Recommendations (IA) ----------------
+@api.get("/recommendations")
+async def recommendations(user: dict = Depends(get_current_user)):
+    order = user["current_stage_order"]
+    lessons = await db.lessons.find({"stage_order": order}).sort([("module_id", 1), ("order", 1)]).to_list(500)
+    done = {p["lesson_id"] async for p in db.lesson_progress.find({"user_id": user["id"], "completed": True})}
+    next_lesson = next(({"id": l["id"], "title": l["title"], "module_title": l.get("module_title")} for l in lessons if l["id"] not in done), None)
+    mdone = {d["mission_id"] async for d in db.mission_progress.find({"user_id": user["id"]})}
+    mission = None
+    for m in await db.missions.find({"active": True}).sort("order", 1).to_list(50):
+        if m["id"] not in mdone:
+            mission = {"id": m["id"], "title": m["title"]}
+            break
+    reading = await db.daily_readings.find_one({"kind": "word"})
+    if reading:
+        reading.pop("_id", None)
+    tip = ""
+    key = os.environ.get("EMERGENT_LLM_KEY")
+    if _LLM_OK and key:
+        try:
+            stage = await db.stages.find_one({"order": order})
+            chat = LlmChat(api_key=key, session_id=f"rec-{user['id']}",
+                           system_message="Você é o Assistente de Formação do app católico CAMINHO. Dê UMA sugestão curta (1-2 frases), acolhedora e concreta para o membro avançar hoje na sua etapa. Não invente doutrina. Não use markdown, asteriscos, títulos nem formatação — apenas texto simples. Responda em português do Brasil.").with_model("anthropic", "claude-sonnet-4-6")
+            tip = await chat.send_message(UserMessage(text=f"Etapa: {stage['name']} — tema {stage['theme']}. Próxima aula: {next_lesson['title'] if next_lesson else 'todas concluídas'}. Missão pendente: {mission['title'] if mission else 'todas concluídas'}. Dê a sugestão."))
+            tip = (tip or "").replace("**", "").replace("##", "").strip()
+        except Exception as e:
+            logging.error(f"rec tip: {e}")
+    return {"next_lesson": next_lesson, "mission": mission, "reading": reading, "tip": tip}
+
+# ---------------- Apologetics / Defesa da Fé ----------------
+@api.get("/apologetics")
+async def apologetics_list(category: Optional[str] = None, user: dict = Depends(get_current_user)):
+    q = {"category": category} if category else {}
+    items = await db.apologetics.find(q).sort("order", 1).to_list(200)
+    cats = await db.apologetics.distinct("category")
+    return {"categories": sorted(cats), "items": [{k: v for k, v in i.items() if k != "_id"} for i in items]}
+
+@api.get("/apologetics/{aid}")
+async def apologetics_detail(aid: str, user: dict = Depends(get_current_user)):
+    i = await db.apologetics.find_one({"id": aid})
+    if not i:
+        raise HTTPException(404, "Conteúdo não encontrado")
+    i.pop("_id", None)
+    return i
+
+# ---------------- Intelligent search ----------------
+@api.get("/search")
+async def search(q: str, user: dict = Depends(get_current_user)):
+    q = (q or "").strip()
+    if len(q) < 2:
+        raise HTTPException(400, "Digite ao menos 2 caracteres.")
+    rx = {"$regex": q, "$options": "i"}
+    max_order = 6 if user["role"] in ("admin", "formador") else user["current_stage_order"]
+    lessons = await db.lessons.find({"stage_order": {"$lte": max_order}, "$or": [{"title": rx}, {"content": rx}, {"dimension": rx}]}).to_list(15)
+    apol = await db.apologetics.find({"$or": [{"question": rx}, {"answer": rx}, {"category": rx}]}).to_list(15)
+    answer = ""
+    key = os.environ.get("EMERGENT_LLM_KEY")
+    if _LLM_OK and key:
+        try:
+            chat = LlmChat(api_key=key, session_id=f"search-{user['id']}", system_message=ASSISTANT_SYSTEM).with_model("anthropic", "claude-sonnet-4-6")
+            answer = await chat.send_message(UserMessage(text=f"Responda de forma breve (até 4 frases) e fiel ao Magistério, citando fontes: {q}"))
+        except Exception as e:
+            logging.error(f"search ai: {e}")
+    return {
+        "lessons": [{"id": l["id"], "title": l["title"], "module_title": l.get("module_title"), "stage_order": l["stage_order"], "dimension": l.get("dimension")} for l in lessons],
+        "apologetics": [{"id": a["id"], "question": a["question"], "category": a["category"]} for a in apol],
+        "answer": answer,
+    }
+
 # ---------------- seed ----------------
 STAGES = [
     {"order": 1, "slug": "PRE_VOCACIONADO", "name": "Pré-Vocacionado", "theme": "Descobrir", "icon": "sprout",
@@ -575,10 +696,54 @@ async def seed():
 
     # lives
     if await db.lives.count_documents({}) == 0:
-        await db.lives.insert_one({"id": str(uuid.uuid4()), "title": "Formação: Viver como Discípulo",
-                                   "description": "Encontro ao vivo com o formador.", "status": "upcoming",
-                                   "date": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
-                                   "former": "Pe. formador", "stage_order": 3})
+        base = datetime.now(timezone.utc)
+        lives = [
+            {"title": "Adoração ao Vivo", "description": "Momento de adoração e louvor com toda a comunidade.", "status": "live", "stage_order": None, "required": False, "former": "Comunidade CAMINHO", "min_presence": 75, "date": base.isoformat()},
+            {"title": "Formação: Viver como Discípulo", "description": "Encontro ao vivo — LIVE OBRIGATÓRIA da etapa Discípulo Ano 1.", "status": "upcoming", "stage_order": 3, "required": True, "former": "Maria Formadora", "min_presence": 75, "date": (base + timedelta(days=1)).isoformat()},
+            {"title": "Kerigma: O primeiro anúncio", "description": "Live introdutória aberta a todos.", "status": "upcoming", "stage_order": 1, "required": False, "former": "Equipe de Missão", "min_presence": 75, "date": (base + timedelta(days=3)).isoformat()},
+            {"title": "Discernindo a vontade de Deus", "description": "Live gravada sobre discernimento vocacional.", "status": "recorded", "stage_order": 2, "required": False, "former": "Padre Convidado", "min_presence": 75, "date": (base - timedelta(days=5)).isoformat()},
+        ]
+        for i, l in enumerate(lives):
+            l["id"] = str(uuid.uuid4()); l["order"] = i
+            await db.lives.insert_one(l)
+
+    # apologetics / Defesa da Fé
+    if await db.apologetics.count_documents({}) == 0:
+        entries = [
+            {"category": "Eucaristia", "question": "A Eucaristia é realmente o Corpo de Cristo?",
+             "answer": "Sim. A Igreja professa a presença real de Cristo — Corpo, Sangue, Alma e Divindade — sob as espécies do pão e do vinho.",
+             "explanation": "Na consagração da Missa acontece a transubstanciação: a substância do pão e do vinho converte-se no Corpo e Sangue de Cristo, permanecendo as aparências. Não é símbolo, é presença real.",
+             "bible": "Jo 6,51-58; Mt 26,26-28; 1Cor 11,23-29", "tradition": "Testemunho unânime dos Padres da Igreja (Santo Inácio de Antioquia, São Justino).",
+             "catechism": "CIC 1373-1381", "magisterium": "Concílio de Trento; Ecclesia de Eucharistia (São João Paulo II)", "extra": ""},
+            {"category": "Nossa Senhora", "question": "Por que os católicos honram Maria?",
+             "answer": "Nós veneramos (não adoramos) Maria como Mãe de Deus e primeira discípula. A adoração é só de Deus.",
+             "explanation": "A honra a Maria conduz sempre a Cristo. Chamá-la Mãe de Deus (Theotokos) protege a verdade de que Jesus é Deus e homem.",
+             "bible": "Lc 1,28.42-48; Jo 2,1-11; Jo 19,26-27", "tradition": "Concílio de Éfeso (431) proclamou Maria Theotokos.",
+             "catechism": "CIC 963-975; 971", "magisterium": "Lumen Gentium, cap. VIII", "extra": ""},
+            {"category": "Papado", "question": "De onde vem a autoridade do Papa?",
+             "answer": "Do próprio Cristo, que confiou a Pedro o primado sobre a Igreja.",
+             "explanation": "O Papa é o sucessor de Pedro e princípio visível de unidade dos bispos e dos fiéis.",
+             "bible": "Mt 16,18-19; Lc 22,32; Jo 21,15-17", "tradition": "Sucessão apostólica ininterrupta dos bispos de Roma.",
+             "catechism": "CIC 880-882", "magisterium": "Vaticano I (Pastor Aeternus); Lumen Gentium 22-23", "extra": ""},
+            {"category": "Confissão", "question": "Por que confessar os pecados a um padre?",
+             "answer": "Porque Cristo deu aos apóstolos o poder de perdoar os pecados em Seu nome.",
+             "explanation": "No sacramento da Reconciliação, o sacerdote age in persona Christi. É Deus quem perdoa, pelo ministério da Igreja.",
+             "bible": "Jo 20,21-23; Tg 5,16; 2Cor 5,18-20", "tradition": "Prática penitencial da Igreja desde os primeiros séculos.",
+             "catechism": "CIC 1441-1449", "magisterium": "Concílio de Trento, sessão XIV", "extra": ""},
+            {"category": "Purgatório", "question": "O purgatório está na Bíblia?",
+             "answer": "Sim, a doutrina tem fundamento bíblico e na Tradição: uma purificação final dos que morrem na graça de Deus.",
+             "explanation": "O purgatório não é uma segunda chance, mas a purificação de quem já está salvo, para entrar na plena santidade do Céu.",
+             "bible": "2Mac 12,46; 1Cor 3,13-15; Mt 12,32", "tradition": "Oração pelos mortos, atestada desde a Igreja primitiva.",
+             "catechism": "CIC 1030-1032", "magisterium": "Concílios de Florença e de Trento", "extra": ""},
+            {"category": "Bíblia e Tradição", "question": "A fé católica se baseia só na Bíblia?",
+             "answer": "Não. A Revelação chega a nós pela Sagrada Escritura e pela Sagrada Tradição, interpretadas pelo Magistério.",
+             "explanation": "Escritura e Tradição formam um único depósito da fé. Foi a própria Igreja, guiada pela Tradição, que definiu o cânon bíblico.",
+             "bible": "2Ts 2,15; 2Tm 2,2; Jo 21,25", "tradition": "Transmissão viva da fé pelos apóstolos e seus sucessores.",
+             "catechism": "CIC 80-83; 95", "magisterium": "Dei Verbum, cap. II", "extra": ""},
+        ]
+        for i, e in enumerate(entries):
+            e["id"] = str(uuid.uuid4()); e["order"] = i
+            await db.apologetics.insert_one(e)
 
     # admin
     admin_email = os.environ["ADMIN_EMAIL"].lower()

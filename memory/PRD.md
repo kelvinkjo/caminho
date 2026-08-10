@@ -40,4 +40,12 @@ PRE_VOCACIONADO → VOCACIONADO → DISCIPULO_ANO_1 → DISCIPULO_ANO_2 → COMP
 - **Dados de teste (item 59)**: 8 usuários — um por etapa (1–6) + formador + admin, todos senha ***REMOVED***.
 - **Segurança reforçada**: acesso a etapa/aula bloqueada retorna 403 no backend mesmo via URL direta; frontend redireciona para a Jornada com aviso. Rota /app/admin restrita a admin (formador não acessa nem via URL). Usuário não altera o próprio nível (apenas admin via PATCH) e só acessa os próprios dados.
 
+## Implementado (2026-06 — iteração 3) ✅
+- **Lives (Fase 3)**: `/api/lives` (buckets ao vivo/próximas/gravadas com acesso por etapa validado no backend), `/api/lives/{id}/presence` (presença mínima 75%, confirmada/parcial). **Lives obrigatórias como requisito de etapa**: `request-approval` bloqueia (400) até a presença nas lives obrigatórias ser confirmada. Página Lives com abas e confirmação de presença.
+- **Recomendações da IA** (`/api/recommendations`): próxima aula + missão pendente (regra) + dica curta gerada por IA (texto simples). Card "Para você hoje" no dashboard + ícone de busca no header.
+- **Defesa da Fé / Apologética** (`/api/apologetics`): trilha com pergunta, resposta curta, explicação, Bíblia, Tradição, Catecismo, Magistério, material complementar. 6 entradas seed, filtro por categoria. Página no Perfil.
+- **Busca Inteligente** (`/api/search`): busca por tema nas aulas (com escopo por etapa) + apologética + resposta doutrinal gerada por IA. Página no Perfil e no header.
+- Testado: 42/42 backend + fluxos frontend (100%).
+
+
 ## Próximas tarefas sugeridas
