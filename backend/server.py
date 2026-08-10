@@ -13,6 +13,12 @@ from typing import List, Optional
 from datetime import datetime, timezone, timedelta
 import logging, uuid, bcrypt, jwt
 
+try:
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+    _LLM_OK = True
+except Exception:
+    _LLM_OK = False
+
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
@@ -422,6 +428,60 @@ async def list_formadores(user: dict = Depends(require_roles("admin"))):
     fs = await db.users.find({"role": "formador"}).to_list(500)
     return [{"id": f["id"], "name": f["name"]} for f in fs]
 
+# ---------------- AI assistant (Fase 8) ----------------
+ASSISTANT_SYSTEM = (
+    "Você é o Assistente de Formação do app CAMINHO, de uma comunidade católica jovem, "
+    "carismática e missionária. Responda em português do Brasil, de forma acolhedora, clara "
+    "e fiel ao Magistério da Igreja Católica.\n\n"
+    "REGRAS OBRIGATÓRIAS:\n"
+    "1. Nunca invente ensinamentos. Se não souber, diga honestamente que não sabe.\n"
+    "2. Sempre que possível, indique as fontes: passagens bíblicas (livro, capítulo e versículo), "
+    "números do Catecismo da Igreja Católica (CIC), documentos do Magistério (encíclicas, concílios) e santos.\n"
+    "3. Diferencie claramente a DOUTRINA OFICIAL da Igreja de opiniões teológicas, tradições piedosas ou pareceres pessoais.\n"
+    "4. Cite documentos do Magistério quando apropriado.\n"
+    "5. Em questões pastorais complexas (pecado grave, discernimento vocacional, situações pessoais, "
+    "sofrimento, saúde mental, decisões de vida), incentive o usuário a procurar um sacerdote, confessor, "
+    "diretor espiritual ou formador da comunidade.\n\n"
+    "Você NÃO substitui o sacerdote, o confessor, o diretor espiritual nem o formador. "
+    "Você é uma ferramenta de apoio à formação, não uma autoridade pastoral."
+)
+
+class AssistantIn(BaseModel):
+    question: str
+    session_id: Optional[str] = None
+
+@api.post("/assistant/ask")
+async def assistant_ask(body: AssistantIn, user: dict = Depends(get_current_user)):
+    q = (body.question or "").strip()
+    if not q:
+        raise HTTPException(400, "Digite uma pergunta.")
+    if len(q) > 2000:
+        raise HTTPException(400, "Pergunta muito longa.")
+    key = os.environ.get("EMERGENT_LLM_KEY")
+    if not _LLM_OK or not key:
+        raise HTTPException(503, "Assistente indisponível no momento.")
+    session_id = body.session_id or str(uuid.uuid4())
+    history = await db.assistant_messages.find(
+        {"user_id": user["id"], "session_id": session_id}).sort("at", 1).to_list(20)
+    convo = ""
+    for h in history[-10:]:
+        convo += f"{'Usuário' if h['role'] == 'user' else 'Assistente'}: {h['text']}\n"
+    prompt = (convo + f"Usuário: {q}\nAssistente:") if convo else q
+    try:
+        chat = LlmChat(api_key=key, session_id=session_id, system_message=ASSISTANT_SYSTEM).with_model("anthropic", "claude-sonnet-4-6")
+        answer = await chat.send_message(UserMessage(text=prompt))
+    except Exception as e:
+        logging.error(f"assistant error: {e}")
+        raise HTTPException(502, "Não foi possível obter uma resposta agora. Tente novamente.")
+    await db.assistant_messages.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "session_id": session_id, "role": "user", "text": q, "at": now_iso()})
+    await db.assistant_messages.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "session_id": session_id, "role": "assistant", "text": answer, "at": now_iso()})
+    return {"answer": answer, "session_id": session_id}
+
+@api.get("/assistant/history")
+async def assistant_history(session_id: str, user: dict = Depends(get_current_user)):
+    msgs = await db.assistant_messages.find({"user_id": user["id"], "session_id": session_id}).sort("at", 1).to_list(100)
+    return [{"role": m["role"], "text": m["text"]} for m in msgs]
+
 # ---------------- seed ----------------
 STAGES = [
     {"order": 1, "slug": "PRE_VOCACIONADO", "name": "Pré-Vocacionado", "theme": "Descobrir", "icon": "sprout",
@@ -556,6 +616,22 @@ async def seed():
                                    "current_stage_order": 3, "formador_id": fid, "onboarded": True,
                                    "blocked": False, "avatar": None, "created_at": now_iso(),
                                    "last_active": (datetime.now(timezone.utc) - timedelta(days=6)).isoformat()})
+
+    # demo users: one per stage (item 59) — all vinculados ao formador
+    stage_users = [
+        ("prevocacionado@caminho.app", "Ana Pré-Vocacionada", 1, 0),
+        ("vocacionado@caminho.app", "Pedro Vocacionado", 2, 1),
+        ("discipulo2@caminho.app", "Tiago Discípulo II", 4, 12),
+        ("compromissado@caminho.app", "Clara Compromissada", 5, 3),
+        ("consagrado@caminho.app", "Lucas Consagrado", 6, 2),
+    ]
+    for email, name, order, inactive_days in stage_users:
+        if not await db.users.find_one({"email": email}):
+            await db.users.insert_one({"id": str(uuid.uuid4()), "name": name, "email": email,
+                                       "password_hash": hash_password("***REMOVED***"), "role": "membro",
+                                       "current_stage_order": order, "formador_id": fid, "onboarded": True,
+                                       "blocked": False, "avatar": None, "created_at": now_iso(),
+                                       "last_active": (datetime.now(timezone.utc) - timedelta(days=inactive_days)).isoformat()})
 
 @app.on_event("startup")
 async def on_startup():

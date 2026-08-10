@@ -11,7 +11,10 @@ export default function LessonPlayer() {
   const [busy, setBusy] = useState(false);
   const nav = useNavigate();
 
-  const load = () => api.get(`/lessons/${id}`).then((r) => setL(r.data));
+  const load = () => api.get(`/lessons/${id}`).then((r) => setL(r.data))
+    .catch((e) => {
+      if (e.response?.status === 403) { toast.error("Aula bloqueada. Avance na sua jornada primeiro."); nav("/app/jornada", { replace: true }); }
+    });
   useEffect(() => { load(); }, [id]);
 
   const complete = async () => {

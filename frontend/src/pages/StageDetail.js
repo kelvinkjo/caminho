@@ -3,12 +3,18 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { Shell } from "../components/Shell";
 import { ArrowLeft, CheckCircle2, Circle, Play, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 
 export default function StageDetail() {
   const { order } = useParams();
   const [data, setData] = useState(null);
   const nav = useNavigate();
-  useEffect(() => { api.get(`/stages/${order}/modules`).then((r) => setData(r.data)); }, [order]);
+  useEffect(() => {
+    api.get(`/stages/${order}/modules`).then((r) => setData(r.data))
+      .catch((e) => {
+        if (e.response?.status === 403) { toast.error("Etapa bloqueada. Avance na sua jornada primeiro."); nav("/app/jornada", { replace: true }); }
+      });
+  }, [order, nav]);
 
   if (!data) return <Shell><div className="flex justify-center py-20"><Loader2 className="animate-spin text-orange-600" /></div></Shell>;
 

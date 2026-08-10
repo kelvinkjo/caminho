@@ -228,3 +228,98 @@ class TestAdmin:
         users2 = requests.get(f"{API}/admin/users", headers=_headers(admin_session["token"])).json()
         m2 = next(u for u in users2 if u["email"] == MEMBRO["email"])
         assert m2["current_stage_order"] == original_stage
+
+
+
+# ------------- STAGE HIERARCHY per user (item 59) -------------
+STAGE_USERS = [
+    ("prevocacionado@caminho.app", 1),
+    ("vocacionado@caminho.app", 2),
+    ("discipulo2@caminho.app", 4),
+    ("compromissado@caminho.app", 5),
+    ("consagrado@caminho.app", 6),
+]
+
+
+class TestStageHierarchy:
+    @pytest.mark.parametrize("email,expected_stage", STAGE_USERS)
+    def test_hierarchy(self, email, expected_stage):
+        d = _login({"email": email, "password": "***REMOVED***"})
+        token = d["token"]
+        me = requests.get(f"{API}/auth/me", headers=_headers(token)).json()
+        assert me["current_stage_order"] == expected_stage, f"{email} expected stage {expected_stage}, got {me['current_stage_order']}"
+        # allowed orders
+        for order in range(1, expected_stage + 1):
+            r = requests.get(f"{API}/stages/{order}/modules", headers=_headers(token))
+            assert r.status_code == 200, f"{email} stage {order} should be accessible, got {r.status_code}"
+        # blocked orders
+        for order in range(expected_stage + 1, 7):
+            r = requests.get(f"{API}/stages/{order}/modules", headers=_headers(token))
+            assert r.status_code == 403, f"{email} stage {order} should be 403, got {r.status_code}"
+
+
+# ------------- CANNOT CHANGE OWN LEVEL -------------
+class TestCannotChangeOwnLevel:
+    def test_membro_patch_self_forbidden(self, membro_session):
+        me = requests.get(f"{API}/auth/me", headers=_headers(membro_session["token"])).json()
+        r = requests.patch(f"{API}/admin/users/{me['id']}",
+                           json={"current_stage_order": 6},
+                           headers=_headers(membro_session["token"]))
+        assert r.status_code == 403
+
+    def test_formador_patch_forbidden(self, formador_session):
+        # formador should not be able to admin-patch users either
+        me = requests.get(f"{API}/auth/me", headers=_headers(formador_session["token"])).json()
+        r = requests.patch(f"{API}/admin/users/{me['id']}",
+                           json={"current_stage_order": 1},
+                           headers=_headers(formador_session["token"]))
+        assert r.status_code == 403
+
+
+# ------------- FORMADOR forbidden on admin endpoints -------------
+class TestFormadorRoleGating:
+    @pytest.mark.parametrize("path", ["/admin/stats", "/admin/users", "/formadores"])
+    def test_formador_no_admin(self, formador_session, path):
+        r = requests.get(f"{API}{path}", headers=_headers(formador_session["token"]))
+        assert r.status_code == 403
+
+
+# ------------- AI ASSISTANT (Fase 8) -------------
+class TestAssistant:
+    def test_unauthenticated(self):
+        r = requests.post(f"{API}/assistant/ask", json={"question": "O que é a Eucaristia?"})
+        assert r.status_code == 401
+
+    def test_empty_question(self, membro_session):
+        r = requests.post(f"{API}/assistant/ask", json={"question": "   "},
+                          headers=_headers(membro_session["token"]))
+        assert r.status_code == 400
+
+    def test_ask_and_history(self, membro_session):
+        token = membro_session["token"]
+        r = requests.post(f"{API}/assistant/ask",
+                          json={"question": "O que é a Eucaristia segundo a Igreja Católica?"},
+                          headers=_headers(token), timeout=90)
+        assert r.status_code == 200, f"assistant ask failed: {r.status_code} {r.text[:400]}"
+        data = r.json()
+        assert "answer" in data and isinstance(data["answer"], str) and len(data["answer"]) > 20
+        assert "session_id" in data and data["session_id"]
+        sid = data["session_id"]
+
+        # Second turn same session
+        r2 = requests.post(f"{API}/assistant/ask",
+                           json={"question": "E qual número do Catecismo fala sobre isso?", "session_id": sid},
+                           headers=_headers(token), timeout=90)
+        assert r2.status_code == 200
+        d2 = r2.json()
+        assert d2["session_id"] == sid
+        assert len(d2["answer"]) > 20
+
+        # History
+        h = requests.get(f"{API}/assistant/history", params={"session_id": sid},
+                         headers=_headers(token))
+        assert h.status_code == 200
+        msgs = h.json()
+        assert isinstance(msgs, list) and len(msgs) >= 4
+        roles = [m["role"] for m in msgs]
+        assert roles.count("user") >= 2 and roles.count("assistant") >= 2

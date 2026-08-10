@@ -35,7 +35,9 @@ PRE_VOCACIONADO → VOCACIONADO → DISCIPULO_ANO_1 → DISCIPULO_ANO_2 → COMP
 - P1: Passaporte da jornada (marcos/selos), Regra de Vida, Diário espiritual (privado/compartilhar com formador), Eventos + confirmar presença + QR Code, Pedidos de oração, Feed da comunidade com moderação, Notificações.
 - P2: Liturgia "Hoje na Igreja", Biblioteca católica, Louvor, Modo Missão, Assistente de Formação com IA, Defesa da Fé, Certificados, Área Consagrados, Relatórios/exportação, privacidade/LGPD, login Google/Apple/telefone.
 
+## Implementado (2026-06 — iteração 2) ✅
+- **FASE 8 — Assistente de Formação com IA** (`/api/assistant/ask`, Claude Sonnet 4.6 via Emergent LLM key): responde sobre Bíblia, Catecismo, doutrina, santos, liturgia, apologética; cita fontes (CIC, passagens), diferencia doutrina de opinião, não inventa e encaminha a sacerdote/formador em questões pastorais. Histórico persistido em `assistant_messages`. Página de chat no Perfil.
+- **Dados de teste (item 59)**: 8 usuários — um por etapa (1–6) + formador + admin, todos senha ***REMOVED***.
+- **Segurança reforçada**: acesso a etapa/aula bloqueada retorna 403 no backend mesmo via URL direta; frontend redireciona para a Jornada com aviso. Rota /app/admin restrita a admin (formador não acessa nem via URL). Usuário não altera o próprio nível (apenas admin via PATCH) e só acessa os próprios dados.
+
 ## Próximas tarefas sugeridas
-- Área de Lives com presença e lives obrigatórias como requisito.
-- Requisitos de etapa configuráveis no admin.
-- Diário espiritual e Regra de Vida (uso diário).

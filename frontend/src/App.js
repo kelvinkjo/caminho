@@ -15,6 +15,7 @@ import MyPeople from "@/pages/MyPeople";
 import Profile from "@/pages/Profile";
 import Lives from "@/pages/Lives";
 import Admin from "@/pages/Admin";
+import Assistant from "@/pages/Assistant";
 
 function Splash() {
   return <div className="min-h-screen bg-stone-950 flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-orange-600" /></div>;
@@ -51,6 +52,7 @@ function App() {
           <Route path="/app/formacao/:order" element={<Protected><StageDetail /></Protected>} />
           <Route path="/app/aula/:id" element={<Protected><LessonPlayer /></Protected>} />
           <Route path="/app/missao" element={<Protected><Missions /></Protected>} />
+          <Route path="/app/assistente" element={<Protected><Assistant /></Protected>} />
           <Route path="/app/lives" element={<Protected><Lives /></Protected>} />
           <Route path="/app/pessoas" element={<Protected roles={["formador", "admin"]}><MyPeople /></Protected>} />
           <Route path="/app/perfil" element={<Protected><Profile /></Protected>} />
