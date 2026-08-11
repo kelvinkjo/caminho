@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { Shell } from "../components/Shell";
-import { LogOut, Users, ShieldCheck, Flame, ChevronRight, Sparkles, Search, ShieldQuestion, Crown } from "lucide-react";
+import { LogOut, Users, ShieldCheck, Flame, ChevronRight, Sparkles, Search, ShieldQuestion, Crown, Award, BookMarked } from "lucide-react";
 
 const roleLabel = { mestre: "Login Mestre", admin: "Administrador", formador: "Formador", moderador: "Moderador", membro: "Membro" };
 
@@ -30,6 +30,10 @@ export default function Profile() {
             <Sparkles className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Assistente de Formação</span><ChevronRight className="text-stone-500" />
           </button>
 
+          <button data-testid="profile-passaporte" onClick={() => nav("/app/passaporte")} className="w-full flex items-center gap-3 rounded-xl border border-stone-800 bg-stone-900 p-4 active:scale-[0.99] transition-transform">
+            <Award className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Passaporte da Jornada</span><ChevronRight className="text-stone-500" />
+          </button>
+
           <button data-testid="profile-busca" onClick={() => nav("/app/busca")} className="w-full flex items-center gap-3 rounded-xl border border-stone-800 bg-stone-900 p-4 active:scale-[0.99] transition-transform">
             <Search className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Busca Inteligente</span><ChevronRight className="text-stone-500" />
           </button>
@@ -37,6 +41,12 @@ export default function Profile() {
           <button data-testid="profile-defesa" onClick={() => nav("/app/defesa")} className="w-full flex items-center gap-3 rounded-xl border border-stone-800 bg-stone-900 p-4 active:scale-[0.99] transition-transform">
             <ShieldQuestion className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Defesa da Fé</span><ChevronRight className="text-stone-500" />
           </button>
+
+          {(user.role === "formador" || user.role === "mestre") && (
+            <button data-testid="profile-formador-panel" onClick={() => nav("/app/formador")} className="w-full flex items-center gap-3 rounded-xl border border-orange-600/40 bg-orange-600/10 p-4 active:scale-[0.99] transition-transform">
+              <BookMarked className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Central do Formador</span><ChevronRight className="text-stone-500" />
+            </button>
+          )}
 
           {(user.role === "formador" || user.role === "admin" || user.role === "mestre") && (
             <button data-testid="profile-people" onClick={() => nav("/app/pessoas")} className="w-full flex items-center gap-3 rounded-xl border border-stone-800 bg-stone-900 p-4 active:scale-[0.99] transition-transform">

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { Shell } from "../components/Shell";
 import { STAGE_ICONS, statusMeta } from "../lib/stages";
-import { Radio, Flame, CalendarDays, ChevronRight, Play, CheckCircle2, Loader2, Search, Sparkles, BookOpen, Bell } from "lucide-react";
+import { Radio, Flame, CalendarDays, ChevronRight, Play, CheckCircle2, Loader2, Search, Sparkles, BookOpen, Bell, Megaphone } from "lucide-react";
 
 function greeting() {
   const h = new Date().getHours();
@@ -12,8 +12,7 @@ function greeting() {
   return "Boa noite";
 }
 
-function NotificationsBanner({ items }) {
-  const [list, setList] = useState(items);
+function NotificationsBanner({ items }) {  const [list, setList] = useState(items);
   const dismiss = async () => { try { await api.post("/notifications/read"); } catch {} setList([]); };
   if (!list.length) return null;
   return (
@@ -57,6 +56,27 @@ function Recommendations({ nav }) {  const [rec, setRec] = useState(null);
   );
 }
 
+function Announcements() {
+  const [items, setItems] = useState(null);
+  useEffect(() => { api.get("/announcements").then((r) => setItems(r.data)).catch(() => setItems([])); }, []);
+  if (!items || items.length === 0) return null;
+  const pr = { urgent: "border-red-600/40 bg-red-600/10", important: "border-yellow-600/40 bg-yellow-600/10", normal: "border-stone-800 bg-stone-900" };
+  return (
+    <section data-testid="announcements">
+      <h4 className="font-heading font-bold text-sm text-stone-400 mb-2 flex items-center gap-2"><Megaphone className="w-4 h-4 text-orange-500" /> Comunicados</h4>
+      <div className="space-y-2">
+        {items.slice(0, 4).map((a) => (
+          <div key={a.id} data-testid={`announcement-${a.id}`} className={`rounded-xl border p-3.5 ${pr[a.priority] || pr.normal}`}>
+            {a.pinned && <span className="text-[10px] text-orange-500">📌 fixado</span>}
+            <p className="font-medium text-sm">{a.title}</p>
+            <p className="text-xs text-stone-400 mt-0.5">{a.message}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export default function Dashboard() {
   const [d, setD] = useState(null);
   const nav = useNavigate();
@@ -77,6 +97,10 @@ export default function Dashboard() {
             <h1 className="font-heading font-black text-2xl tracking-tight">{d.user.name.split(" ")[0]}</h1>
           </div>
           <div className="flex items-center gap-3">
+            <button data-testid="header-notifications" onClick={() => nav("/app/notificacoes")} className="relative w-11 h-11 rounded-full bg-stone-900 border border-stone-800 flex items-center justify-center text-stone-400 active:scale-95 transition-transform">
+              <Bell className="w-5 h-5" />
+              {d.notifications?.length > 0 && <span className="absolute top-2 right-2.5 w-2 h-2 rounded-full bg-orange-500" />}
+            </button>
             <button data-testid="header-search" onClick={() => nav("/app/busca")} className="w-11 h-11 rounded-full bg-stone-900 border border-stone-800 flex items-center justify-center text-stone-400 active:scale-95 transition-transform">
               <Search className="w-5 h-5" />
             </button>
@@ -167,6 +191,9 @@ export default function Dashboard() {
 
         {/* Recomendações IA */}
         <Recommendations nav={nav} />
+
+        {/* Comunicados */}
+        <Announcements />
 
         {/* Missão da semana */}
         <section>

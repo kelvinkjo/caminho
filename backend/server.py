@@ -123,7 +123,7 @@ async def register(body: RegisterIn, response: Response):
         "id": uid, "name": body.name, "email": email,
         "password_hash": hash_password(body.password),
         "role": "membro", "current_stage_order": 1, "formador_id": None,
-        "onboarded": False, "blocked": False, "avatar": None,
+        "onboarded": False, "blocked": False, "avatar": None, "permissions": [],
         "created_at": now_iso(), "last_active": now_iso(),
     }
     await db.users.insert_one(doc)
@@ -155,6 +155,7 @@ async def me(user: dict = Depends(get_current_user)):
 @api.post("/auth/onboard-complete")
 async def onboard_complete(user: dict = Depends(get_current_user)):
     await db.users.update_one({"id": user["id"]}, {"$set": {"onboarded": True}})
+    await award(user["id"], "primeiro_encontro")
     return {"ok": True}
 
 @api.post("/auth/forgot-password")
@@ -245,16 +246,26 @@ async def set_progress(lesson_id: str, body: ProgressIn, user: dict = Depends(ge
                   "stage_order": l["stage_order"], "updated_at": now_iso()},
          "$setOnInsert": {"id": str(uuid.uuid4()), "started_at": now_iso()}},
         upsert=True)
+    if body.completed:
+        await award(user["id"], "primeira_formacao")
     return {"ok": True, "progress": await stage_progress(user["id"], l["stage_order"])}
 
 # ---------------- formation status + recomendação (NUNCA altera etapa) ----------------
 # REGRA INVIOLÁVEL: concluir a formação NÃO muda a etapa. Etapa só muda pelo Login Mestre.
+async def stage_reqs(order: int):
+    r = await db.stage_requirements.find_one({"order": order})
+    return {"require_lessons": r.get("require_lessons", True) if r else True,
+            "require_mandatory_lives": r.get("require_mandatory_lives", True) if r else True}
+
 async def formation_status(user_id: str, order: int):
     prog = await stage_progress(user_id, order)
-    lives_pending = await mandatory_lives_pending(user_id, order)
-    concluded = prog["percent"] >= 100 and not lives_pending
+    reqs = await stage_reqs(order)
+    lessons_ok = (prog["percent"] >= 100) if reqs["require_lessons"] else True
+    lives_pending = (await mandatory_lives_pending(user_id, order)) if reqs["require_mandatory_lives"] else False
+    concluded = lessons_ok and not lives_pending
     return {"percent": prog["percent"], "completed_lessons": prog["completed"],
-            "total_lessons": prog["total"], "mandatory_lives_ok": not lives_pending, "concluded": concluded}
+            "total_lessons": prog["total"], "mandatory_lives_ok": not lives_pending,
+            "concluded": concluded, "requirements": reqs}
 
 @api.get("/formation/status")
 async def my_formation_status(user: dict = Depends(get_current_user)):
@@ -354,6 +365,7 @@ async def complete_mission(mission_id: str, user: dict = Depends(get_current_use
     await db.mission_progress.update_one(
         {"user_id": user["id"], "mission_id": mission_id},
         {"$set": {"completed_at": now_iso()}, "$setOnInsert": {"id": str(uuid.uuid4())}}, upsert=True)
+    await award(user["id"], "primeira_missao")
     return {"ok": True}
 
 @api.get("/daily-word")
@@ -428,6 +440,8 @@ async def admin_patch_user(uid: str, body: AdminUserPatch, user: dict = Depends(
     if not updates:
         return {"ok": True}
     await db.users.update_one({"id": uid}, {"$set": updates})
+    if updates.get("formador_id"):
+        await award(uid, "primeiro_acompanhamento")
     await db.audit_logs.insert_one({"id": str(uuid.uuid4()), "action": "admin_update_user", "by": user["id"],
                                     "user_id": uid, "changes": updates, "at": now_iso()})
     return {"ok": True}
@@ -513,6 +527,10 @@ async def _apply_stage(uid: str, new_order: int, reason: str, action: str, maste
            "changed_by": master["id"], "changed_by_name": master["name"], "changed_at": now_iso(),
            "reason": reason.strip(), "change_type": change_type, "ip": ip}
     await db.stage_change_logs.insert_one(log)
+    if new_order >= 5:
+        await award(uid, "compromisso")
+    if new_order >= 6:
+        await award(uid, "consagracao")
     stages = {s["order"]: s["name"] async for s in db.stages.find()}
     if change_type == "MAINTAIN_STAGE":
         await notify(uid, "Sua formação foi registrada", f"Sua caminhada continuará na etapa {stages.get(new_order,'')}.")
@@ -637,6 +655,9 @@ class PresenceIn(BaseModel):
 def live_accessible(live: dict, user: dict) -> bool:
     if user["role"] in ("admin", "formador", "mestre"):
         return True
+    stages = live.get("stages")
+    if stages:
+        return user["current_stage_order"] in stages
     so = live.get("stage_order")
     return so is None or so <= user["current_stage_order"]
 
@@ -660,7 +681,7 @@ async def get_lives(user: dict = Depends(get_current_user)):
         a = att.get(l["id"])
         l["presence_percent"] = a["percent"] if a else 0
         l["presence_confirmed"] = bool(a and a.get("confirmed"))
-        key = {"live": "live_now", "upcoming": "upcoming", "recorded": "recorded"}.get(l.get("status"), "upcoming")
+        key = {"live": "live_now", "scheduled": "upcoming", "upcoming": "upcoming", "ended": "recorded", "recorded": "recorded"}.get(l.get("status"), "upcoming")
         buckets[key].append(l)
     return buckets
 
@@ -748,6 +769,347 @@ async def search(q: str, user: dict = Depends(get_current_user)):
         "apologetics": [{"id": a["id"], "question": a["question"], "category": a["category"]} for a in apol],
         "answer": answer,
     }
+
+# ---------------- Passaporte da Jornada ----------------
+MILESTONES = [
+    ("primeiro_encontro", "Primeiro Encontro", "sparkles", "O início de tudo: o encontro com Cristo."),
+    ("primeira_formacao", "Primeira Formação", "book-open", "A primeira aula concluída na caminhada."),
+    ("primeira_missao", "Primeira Missão", "flame", "O primeiro passo em missão."),
+    ("primeiro_retiro", "Primeiro Retiro", "tent", "O primeiro retiro vivido com a comunidade."),
+    ("primeiro_acompanhamento", "Primeiro Acompanhamento", "users", "Vinculado a um formador na caminhada."),
+    ("primeira_evangelizacao", "Primeira Evangelização", "megaphone", "O primeiro anúncio a alguém."),
+    ("compromisso", "Compromisso", "handshake", "A entrega madura à comunidade e à missão."),
+    ("consagracao", "Consagração", "crown", "Permanecer, liderar e gerar novos discípulos."),
+]
+MILESTONE_KEYS = {m[0] for m in MILESTONES}
+
+async def award(user_id: str, key: str):
+    if key not in MILESTONE_KEYS:
+        return
+    await db.passport_awards.update_one(
+        {"user_id": user_id, "milestone_key": key},
+        {"$setOnInsert": {"id": str(uuid.uuid4()), "awarded_at": now_iso()}}, upsert=True)
+
+@api.get("/passport")
+async def get_passport(user: dict = Depends(get_current_user)):
+    earned = {a["milestone_key"]: a async for a in db.passport_awards.find({"user_id": user["id"]})}
+    items = []
+    for key, title, icon, desc in MILESTONES:
+        a = earned.get(key)
+        items.append({"key": key, "title": title, "icon": icon, "description": desc,
+                      "earned": bool(a), "awarded_at": a["awarded_at"] if a else None})
+    return {"items": items, "earned_count": len(earned), "total": len(MILESTONES)}
+
+@api.post("/master/users/{uid}/passport/{key}")
+async def master_grant_milestone(uid: str, key: str, master: dict = Depends(require_master)):
+    if key not in MILESTONE_KEYS:
+        raise HTTPException(404, "Marco inválido")
+    await award(uid, key)
+    return {"ok": True}
+
+# ---------------- Requisitos configuráveis por etapa (Mestre) ----------------
+class StageReqIn(BaseModel):
+    require_lessons: bool
+    require_mandatory_lives: bool
+
+@api.get("/master/stage-requirements")
+async def get_stage_requirements(master: dict = Depends(require_master)):
+    stages = await db.stages.find().sort("order", 1).to_list(100)
+    out = []
+    for s in stages:
+        reqs = await stage_reqs(s["order"])
+        out.append({"order": s["order"], "name": s["name"], **reqs})
+    return out
+
+@api.put("/master/stage-requirements/{order}")
+async def set_stage_requirements(order: int, body: StageReqIn, master: dict = Depends(require_master)):
+    await db.stage_requirements.update_one({"order": order},
+        {"$set": {"order": order, "require_lessons": body.require_lessons, "require_mandatory_lives": body.require_mandatory_lives}}, upsert=True)
+    return {"ok": True}
+
+# ---------------- Relatório Pastoral (Mestre) ----------------
+@api.get("/master/pastoral-report")
+async def pastoral_report(master: dict = Depends(require_master)):
+    membros = await db.users.find({"role": "membro"}).to_list(2000)
+    stages = {s["order"]: s["name"] async for s in db.stages.find()}
+    formadores = {f["id"]: f["name"] async for f in db.users.find({"role": "formador"})}
+    by_stage = {}
+    awaiting = []
+    for m in membros:
+        o = m["current_stage_order"]
+        fs = await formation_status(m["id"], o)
+        b = by_stage.setdefault(o, {"order": o, "stage": stages.get(o, ""), "total": 0, "concluded": 0})
+        b["total"] += 1
+        if fs["concluded"]:
+            b["concluded"] += 1
+            awaiting.append({"id": m["id"], "name": m["name"], "order": o, "stage_name": stages.get(o, ""),
+                             "formador": formadores.get(m.get("formador_id"), "Sem formador"), "percent": fs["percent"]})
+    awaiting.sort(key=lambda x: (x["order"], x["name"]))
+    return {"by_stage": sorted(by_stage.values(), key=lambda x: x["order"]),
+            "awaiting": awaiting, "awaiting_count": len(awaiting), "total_membros": len(membros)}
+
+# ---------------- PERMISSÕES GRANULARES + GESTÃO DE CONTEÚDO/LIVES ----------------
+ALL_PERMISSIONS = [
+    "CREATE_COURSE", "EDIT_COURSE", "DELETE_COURSE", "PUBLISH_COURSE",
+    "CREATE_MODULE", "EDIT_MODULE", "DELETE_MODULE",
+    "CREATE_LESSON", "EDIT_LESSON", "DELETE_LESSON", "PUBLISH_LESSON",
+    "UPLOAD_VIDEO", "UPLOAD_AUDIO", "UPLOAD_DOCUMENT",
+    "CREATE_ANNOUNCEMENT", "EDIT_ANNOUNCEMENT", "DELETE_ANNOUNCEMENT", "PUBLISH_ANNOUNCEMENT",
+    "CREATE_LIVE", "EDIT_LIVE", "START_LIVE", "END_LIVE", "MODERATE_LIVE",
+    "VIEW_ANALYTICS", "MANAGE_CONTENT_ACCESS", "EDIT_ALL_CONTENT",
+]
+
+def has_perm(user: dict, perm: str) -> bool:
+    if user["role"] == "mestre":
+        return True
+    return perm in (user.get("permissions") or [])
+
+def require_perm(perm: str):
+    async def dep(user: dict = Depends(get_current_user)):
+        if not has_perm(user, perm):
+            raise HTTPException(403, f"Permissão necessária: {perm}")
+        return user
+    return dep
+
+def can_edit(user: dict, doc: dict) -> bool:
+    return user["role"] == "mestre" or doc.get("owner_id") == user["id"] or has_perm(user, "EDIT_ALL_CONTENT")
+
+async def audit(action: str, user: dict, **extra):
+    await db.audit_logs.insert_one({"id": str(uuid.uuid4()), "action": action, "by": user["id"],
+                                    "by_name": user["name"], "at": now_iso(), **extra})
+
+class CourseIn(BaseModel):
+    title: str
+    description: str = ""
+    category: str = ""
+    stages: List[int] = []
+    publish: bool = False
+
+class ModuleIn(BaseModel):
+    stage_order: int
+    title: str
+    description: str = ""
+
+class LessonIn(BaseModel):
+    module_id: str
+    title: str
+    content: str = ""
+    dimension: str = "Formação"
+    duration_min: int = 10
+    stage_order: int
+    required: bool = False
+    video_url: str = ""
+    publish: bool = True
+
+class LessonPatch(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+
+class AnnouncementIn(BaseModel):
+    title: str
+    message: str
+    priority: str = "normal"
+    stages: List[int] = []
+    publish: bool = True
+    pinned: bool = False
+
+class LiveIn(BaseModel):
+    title: str
+    description: str = ""
+    date: str = ""
+    presenter: str = ""
+    stages: List[int] = []
+    chat_enabled: bool = True
+    required: bool = False
+    min_presence: int = 75
+    stream_url: str = ""
+
+class LivePatch(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    date: Optional[str] = None
+    stages: Optional[List[int]] = None
+
+class PermsIn(BaseModel):
+    permissions: List[str]
+
+# --- catálogo + permissões do usuário ---
+@api.get("/permissions/catalog")
+async def perms_catalog(user: dict = Depends(get_current_user)):
+    return {"permissions": ALL_PERMISSIONS}
+
+@api.get("/master/formadores-permissions")
+async def formadores_permissions(master: dict = Depends(require_master)):
+    fs = await db.users.find({"role": "formador"}).to_list(500)
+    return [{"id": f["id"], "name": f["name"], "email": f["email"], "blocked": f.get("blocked", False),
+             "permissions": f.get("permissions") or []} for f in fs]
+
+@api.put("/master/formadores/{fid}/permissions")
+async def set_formador_permissions(fid: str, body: PermsIn, master: dict = Depends(require_master)):
+    f = await db.users.find_one({"id": fid})
+    if not f or f["role"] != "formador":
+        raise HTTPException(404, "Formador não encontrado")
+    perms = [p for p in body.permissions if p in ALL_PERMISSIONS]  # etapas NUNCA são concedidas aqui
+    await db.users.update_one({"id": fid}, {"$set": {"permissions": perms}})
+    await audit("set_permissions", master, target=fid, permissions=perms)
+    return {"ok": True, "permissions": perms}
+
+# --- cursos ---
+@api.post("/courses")
+async def create_course(body: CourseIn, user: dict = Depends(require_perm("CREATE_COURSE"))):
+    doc = {"id": str(uuid.uuid4()), "title": body.title, "description": body.description, "category": body.category,
+           "stages": body.stages, "owner_id": user["id"], "owner_name": user["name"],
+           "status": "published" if body.publish else "draft", "created_at": now_iso()}
+    await db.courses.insert_one(doc)
+    await audit("create_course", user, course_id=doc["id"])
+    doc.pop("_id", None)
+    return doc
+
+@api.get("/courses")
+async def list_courses(user: dict = Depends(get_current_user)):
+    if user["role"] in ("mestre", "formador", "admin"):
+        items = await db.courses.find().sort("created_at", -1).to_list(500)
+    else:
+        items = await db.courses.find({"status": "published"}).to_list(500)
+        items = [c for c in items if not c.get("stages") or user["current_stage_order"] in c["stages"]]
+    for c in items:
+        c.pop("_id", None)
+    return items
+
+# --- módulos/aulas (autoria) ---
+@api.post("/modules")
+async def create_module(body: ModuleIn, user: dict = Depends(require_perm("CREATE_MODULE"))):
+    count = await db.modules.count_documents({"stage_order": body.stage_order})
+    doc = {"id": str(uuid.uuid4()), "stage_order": body.stage_order, "order": count + 1,
+           "title": body.title, "description": body.description, "owner_id": user["id"]}
+    await db.modules.insert_one(doc)
+    await audit("create_module", user, module_id=doc["id"])
+    doc.pop("_id", None)
+    return doc
+
+@api.post("/lessons")
+async def create_lesson(body: LessonIn, user: dict = Depends(require_perm("CREATE_LESSON"))):
+    m = await db.modules.find_one({"id": body.module_id})
+    if not m:
+        raise HTTPException(404, "Módulo não encontrado")
+    count = await db.lessons.count_documents({"module_id": body.module_id})
+    doc = {"id": str(uuid.uuid4()), "module_id": body.module_id, "module_title": m["title"],
+           "stage_order": body.stage_order, "order": count + 1, "title": body.title,
+           "dimension": body.dimension, "duration_min": body.duration_min, "video_url": body.video_url,
+           "content": body.content, "required": body.required, "owner_id": user["id"],
+           "status": "published" if body.publish else "draft"}
+    await db.lessons.insert_one(doc)
+    await audit("create_lesson", user, lesson_id=doc["id"])
+    doc.pop("_id", None)
+    return doc
+
+@api.patch("/lessons/{lid}")
+async def edit_lesson(lid: str, body: LessonPatch, user: dict = Depends(require_perm("EDIT_LESSON"))):
+    l = await db.lessons.find_one({"id": lid})
+    if not l:
+        raise HTTPException(404, "Aula não encontrada")
+    if not can_edit(user, l):
+        raise HTTPException(403, "Você só pode editar seus próprios conteúdos.")
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if updates:
+        await db.lessons.update_one({"id": lid}, {"$set": updates})
+        await audit("edit_lesson", user, lesson_id=lid)
+    return {"ok": True}
+
+# --- avisos ---
+@api.post("/announcements")
+async def create_announcement(body: AnnouncementIn, user: dict = Depends(require_perm("CREATE_ANNOUNCEMENT"))):
+    doc = {"id": str(uuid.uuid4()), "title": body.title, "message": body.message, "priority": body.priority,
+           "stages": body.stages, "pinned": body.pinned, "owner_id": user["id"], "owner_name": user["name"],
+           "status": "published" if body.publish else "draft", "created_at": now_iso()}
+    await db.announcements.insert_one(doc)
+    await audit("create_announcement", user, announcement_id=doc["id"])
+    doc.pop("_id", None)
+    return doc
+
+@api.get("/announcements")
+async def list_announcements(user: dict = Depends(get_current_user)):
+    if user["role"] in ("mestre", "formador", "admin"):
+        items = await db.announcements.find().sort([("pinned", -1), ("created_at", -1)]).to_list(200)
+    else:
+        items = await db.announcements.find({"status": "published"}).sort([("pinned", -1), ("created_at", -1)]).to_list(200)
+        items = [a for a in items if not a.get("stages") or user["current_stage_order"] in a["stages"]]
+    for a in items:
+        a.pop("_id", None)
+    return items
+
+@api.delete("/announcements/{aid}")
+async def delete_announcement(aid: str, user: dict = Depends(require_perm("DELETE_ANNOUNCEMENT"))):
+    a = await db.announcements.find_one({"id": aid})
+    if not a:
+        raise HTTPException(404, "Aviso não encontrado")
+    if not can_edit(user, a):
+        raise HTTPException(403, "Você só pode remover seus próprios avisos.")
+    await db.announcements.delete_one({"id": aid})
+    await audit("delete_announcement", user, announcement_id=aid)
+    return {"ok": True}
+
+# --- lives: criar / editar / iniciar / encerrar ---
+@api.post("/lives")
+async def create_live(body: LiveIn, user: dict = Depends(require_perm("CREATE_LIVE"))):
+    doc = {"id": str(uuid.uuid4()), "title": body.title, "description": body.description,
+           "date": body.date or now_iso(), "former": body.presenter or user["name"], "presenter": body.presenter or user["name"],
+           "stages": body.stages, "stage_order": (body.stages[0] if body.stages else None),
+           "chat_enabled": body.chat_enabled, "required": body.required, "min_presence": body.min_presence,
+           "stream_url": body.stream_url, "status": "scheduled", "owner_id": user["id"], "created_at": now_iso()}
+    await db.lives.insert_one(doc)
+    await audit("create_live", user, live_id=doc["id"])
+    doc.pop("_id", None)
+    return doc
+
+@api.patch("/lives/{lid}")
+async def edit_live(lid: str, body: LivePatch, user: dict = Depends(require_perm("EDIT_LIVE"))):
+    l = await db.lives.find_one({"id": lid})
+    if not l:
+        raise HTTPException(404, "Live não encontrada")
+    if not can_edit(user, l):
+        raise HTTPException(403, "Você só pode editar suas próprias lives.")
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if "stages" in updates:
+        updates["stage_order"] = updates["stages"][0] if updates["stages"] else None
+    if updates:
+        await db.lives.update_one({"id": lid}, {"$set": updates})
+        await audit("edit_live", user, live_id=lid)
+    return {"ok": True}
+
+@api.post("/lives/{lid}/start")
+async def start_live(lid: str, user: dict = Depends(require_perm("START_LIVE"))):
+    l = await db.lives.find_one({"id": lid})
+    if not l:
+        raise HTTPException(404, "Live não encontrada")
+    if not can_edit(user, l):
+        raise HTTPException(403, "Você não é responsável por esta live.")
+    await db.lives.update_one({"id": lid}, {"$set": {"status": "live", "started_at": now_iso()}})
+    await audit("start_live", user, live_id=lid)
+    # notifica membros autorizados
+    stages = l.get("stages") or ([l["stage_order"]] if l.get("stage_order") else [])
+    q = {"role": "membro"} if not stages else {"role": "membro", "current_stage_order": {"$in": stages}}
+    async for m in db.users.find(q):
+        await notify(m["id"], "🔴 Ao vivo agora", f"A live '{l['title']}' começou. Entre na transmissão.")
+    return {"ok": True, "status": "live"}
+
+@api.post("/lives/{lid}/end")
+async def end_live(lid: str, user: dict = Depends(require_perm("END_LIVE"))):
+    l = await db.lives.find_one({"id": lid})
+    if not l:
+        raise HTTPException(404, "Live não encontrada")
+    if not can_edit(user, l):
+        raise HTTPException(403, "Você não é responsável por esta live.")
+    started = l.get("started_at")
+    dur = None
+    if started:
+        try:
+            dur = int((datetime.now(timezone.utc) - datetime.fromisoformat(started)).total_seconds() // 60)
+        except Exception:
+            dur = None
+    await db.lives.update_one({"id": lid}, {"$set": {"status": "ended", "ended_at": now_iso(), "duration_min": dur}})
+    await audit("end_live", user, live_id=lid, duration_min=dur)
+    return {"ok": True, "status": "ended", "duration_min": dur}
 
 # ---------------- seed ----------------
 STAGES = [
@@ -906,6 +1268,9 @@ async def seed():
         admin_id = existing["id"]
         if existing.get("role") != "mestre":
             await db.users.update_one({"email": admin_email}, {"$set": {"role": "mestre", "name": "Kelvin (Login Mestre)"}})
+        # salvaguarda: o Login Mestre nunca deve permanecer bloqueado
+        if existing.get("blocked"):
+            await db.users.update_one({"email": admin_email}, {"$set": {"blocked": False}})
         if not verify_password(admin_pw, existing["password_hash"]):
             await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_pw)}})
 
@@ -918,6 +1283,21 @@ async def seed():
 
     # settings
     await db.settings.update_one({"key": "app"}, {"$setOnInsert": {"key": "app", "allow_stage_skip": True}}, upsert=True)
+
+    # requisitos por etapa (padrão: exige 100% aulas + lives obrigatórias)
+    for s in STAGES:
+        await db.stage_requirements.update_one({"order": s["order"]},
+            {"$setOnInsert": {"order": s["order"], "require_lessons": True, "require_mandatory_lives": True}}, upsert=True)
+
+    # permissões: garante campo em todos; concede conjunto demo ao formador
+    await db.users.update_many({"permissions": {"$exists": False}}, {"$set": {"permissions": []}})
+    demo_former_perms = ["CREATE_COURSE", "EDIT_COURSE", "CREATE_MODULE", "CREATE_LESSON", "EDIT_LESSON",
+                         "PUBLISH_LESSON", "UPLOAD_VIDEO", "UPLOAD_AUDIO", "UPLOAD_DOCUMENT",
+                         "CREATE_ANNOUNCEMENT", "DELETE_ANNOUNCEMENT", "CREATE_LIVE", "EDIT_LIVE",
+                         "START_LIVE", "END_LIVE", "MODERATE_LIVE", "VIEW_ANALYTICS"]
+    fdoc = await db.users.find_one({"email": "formador@caminho.app"})
+    if fdoc and not fdoc.get("permissions"):
+        await db.users.update_one({"id": fdoc["id"]}, {"$set": {"permissions": demo_former_perms}})
 
     # demo formador
     former = await db.users.find_one({"email": "formador@caminho.app"})

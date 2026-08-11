@@ -19,6 +19,12 @@ import Assistant from "@/pages/Assistant";
 import Apologetics from "@/pages/Apologetics";
 import Search from "@/pages/Search";
 import MasterControl from "@/pages/MasterControl";
+import Passport from "@/pages/Passport";
+import Notifications from "@/pages/Notifications";
+import PastoralReport from "@/pages/PastoralReport";
+import StageRequirements from "@/pages/StageRequirements";
+import MasterPermissions from "@/pages/MasterPermissions";
+import FormerPanel from "@/pages/FormerPanel";
 
 function Splash() {
   return <div className="min-h-screen bg-stone-950 flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-orange-600" /></div>;
@@ -62,6 +68,12 @@ function App() {
           <Route path="/app/pessoas" element={<Protected roles={["formador", "admin", "mestre"]}><MyPeople /></Protected>} />
           <Route path="/app/perfil" element={<Protected><Profile /></Protected>} />
           <Route path="/app/mestre" element={<Protected roles={["mestre"]}><MasterControl /></Protected>} />
+          <Route path="/app/mestre/relatorio" element={<Protected roles={["mestre"]}><PastoralReport /></Protected>} />
+          <Route path="/app/mestre/requisitos" element={<Protected roles={["mestre"]}><StageRequirements /></Protected>} />
+          <Route path="/app/mestre/permissoes" element={<Protected roles={["mestre"]}><MasterPermissions /></Protected>} />
+          <Route path="/app/formador" element={<Protected roles={["formador", "mestre"]}><FormerPanel /></Protected>} />
+          <Route path="/app/passaporte" element={<Protected><Passport /></Protected>} />
+          <Route path="/app/notificacoes" element={<Protected><Notifications /></Protected>} />
           <Route path="/app/admin" element={<Protected roles={["admin", "mestre"]}><Admin /></Protected>} />
           <Route path="*" element={<Navigate to="/app" replace />} />
         </Routes>

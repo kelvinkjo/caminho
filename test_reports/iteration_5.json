@@ -1,0 +1,21 @@
+{
+  "summary": "Iteration 5 — added and executed 20 new backend tests covering the 4 new features (Requisitos Configuráveis, Passaporte da Jornada, Relatório Pastoral, Central de Notificações) on top of the existing iteration-4 suite. Backend: 52 passed / 1 skipped (skip is TestStageAccessControl::test_higher_stage_lesson_blocked — expected, no seeded stage>3 lesson). Frontend Playwright verified: (a) mestre Profile → Controle Mestre → both master-report-btn and master-reqs-btn render; Requisitos page toggles req-lessons-3 and persists after reload (restored to defaults after); PastoralReport shows report-stage-3 and 1 awaiting-* card (membro); (b) membro dashboard header-notifications bell navigates to /app/notificacoes listing 12 notifications with 'Marcar lidas' action; Profile → profile-passaporte opens Passaporte grid with 8 milestone-* seals; (c) formador and admin both redirected away from /app/mestre/relatorio and /app/mestre/requisitos. INVARIANT verified: toggling stage_requirements does NOT change /api/auth/me current_stage_order.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now 1076 lines — repeated recommendation to split into routers (auth, stages, master, formador, passport, notifications, admin, ai).",
+    "pastoral_report iterates all membros and calls formation_status per user (N+1 style with multiple db reads). For >100 membros consider aggregating stage_progress in a single pipeline.",
+    "MILESTONES is a module-level constant but MILESTONE_KEYS is a set derived from it — fine, but the auto-award hooks (onboard_complete/set_progress/complete_mission/_apply_stage) each hard-code the milestone key string; consider centralizing hook mapping to reduce drift when new milestones are added.",
+    "GET /passport uses `async for` cursor iteration inside a dict-comprehension which is unusual; a to_list(100) would be clearer and avoids surprising behavior if MILESTONES grows."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "100% (52/52 executed; 1 skipped by design)", "frontend": "100% (9/9 UI checks)"},
+  "seed_data_creation": "Reused seeded demo users. Tests grant primeiro_retiro passport milestone to membro@caminho.app and complete lessons/lives on stage 3 (idempotent). stage_requirements order 3 was toggled off/on and RESTORED to defaults (require_lessons=true, require_mandatory_lives=true).",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_self_test": true,
+  "test_credentials": "All '***REMOVED***' per /app/memory/test_credentials.md.",
+  "context_for_next_testing_agent": "backend_test.py now contains 12 iteration-4 classes + 4 new iteration-5 classes: TestStageRequirements, TestPassport, TestPastoralReport, TestNotificationsCentral. Run with `pytest backend/tests/backend_test.py -n 0` (serial) because tests share membro@caminho.app. UI testids for iteration 5: master-report-btn, master-reqs-btn, req-stage-{o}, req-lessons-{o}, req-lives-{o}, report-stage-{o}, awaiting-{id}, milestone-{key}, header-notifications, notif-{id}, mark-all-read, profile-passaporte. Both /app/mestre/relatorio and /app/mestre/requisitos are gated to role=mestre.",
+  "rca_of_the_issue": "N/A — no failures."
+}

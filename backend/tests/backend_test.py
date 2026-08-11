@@ -444,6 +444,190 @@ class TestStageHierarchy:
             assert requests.get(f"{API}/stages/{order}/modules", headers=_h(d["token"])).status_code == 403
 
 
+# ---------------- ITERATION 5: Requisitos Configuráveis ----------------
+class TestStageRequirements:
+    def test_get_requirements_defaults(self, mestre_s):
+        r = requests.get(f"{API}/master/stage-requirements", headers=_h(mestre_s["token"]))
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data) == 6
+        for s in data:
+            assert "order" in s and "require_lessons" in s and "require_mandatory_lives" in s
+
+    @pytest.mark.parametrize("role_key", ["formador_s", "membro_s", "admin_s"])
+    def test_non_master_forbidden(self, request, role_key):
+        s = request.getfixturevalue(role_key)
+        r = requests.get(f"{API}/master/stage-requirements", headers=_h(s["token"]))
+        assert r.status_code == 403
+        r2 = requests.put(f"{API}/master/stage-requirements/3",
+                          json={"require_lessons": False, "require_mandatory_lives": False},
+                          headers=_h(s["token"]))
+        assert r2.status_code == 403
+
+    def test_toggle_affects_formation_status_but_not_stage(self, mestre_s, membro_s):
+        me = _me(membro_s["token"])
+        _reset_membro_to_stage_3(mestre_s["token"], me["id"])
+        stage_before = me["current_stage_order"]
+
+        # First reset progress by getting current status
+        fs_before = requests.get(f"{API}/formation/status", headers=_h(membro_s["token"])).json()
+
+        # Toggle both requirements OFF for stage 3
+        r = requests.put(f"{API}/master/stage-requirements/3",
+                        json={"require_lessons": False, "require_mandatory_lives": False},
+                        headers=_h(mestre_s["token"]))
+        assert r.status_code == 200
+
+        try:
+            fs_after = requests.get(f"{API}/formation/status", headers=_h(membro_s["token"])).json()
+            # with both off, concluded must be True regardless
+            assert fs_after["concluded"] is True
+            assert fs_after["requirements"]["require_lessons"] is False
+            assert fs_after["requirements"]["require_mandatory_lives"] is False
+
+            # Stage MUST NOT change
+            me_after = _me(membro_s["token"])
+            assert me_after["current_stage_order"] == stage_before, "requisitos toggle NÃO deve mudar etapa"
+        finally:
+            # Restore defaults
+            requests.put(f"{API}/master/stage-requirements/3",
+                        json={"require_lessons": True, "require_mandatory_lives": True},
+                        headers=_h(mestre_s["token"]))
+
+
+# ---------------- ITERATION 5: Passaporte da Jornada ----------------
+class TestPassport:
+    def test_get_passport_structure(self, membro_s):
+        r = requests.get(f"{API}/passport", headers=_h(membro_s["token"]))
+        assert r.status_code == 200
+        data = r.json()
+        assert data["total"] == 8
+        assert len(data["items"]) == 8
+        for item in data["items"]:
+            for k in ("key", "title", "icon", "description", "earned", "awarded_at"):
+                assert k in item
+
+    def test_passport_available_to_any_user(self, formador_s, admin_s, mestre_s):
+        for s in (formador_s, admin_s, mestre_s):
+            r = requests.get(f"{API}/passport", headers=_h(s["token"]))
+            assert r.status_code == 200
+
+    def test_master_grants_milestone(self, mestre_s, membro_s):
+        me = _me(membro_s["token"])
+        r = requests.post(f"{API}/master/users/{me['id']}/passport/primeiro_retiro",
+                        headers=_h(mestre_s["token"]))
+        assert r.status_code == 200
+        p = requests.get(f"{API}/passport", headers=_h(membro_s["token"])).json()
+        retiro = next(i for i in p["items"] if i["key"] == "primeiro_retiro")
+        assert retiro["earned"] is True
+        assert retiro["awarded_at"] is not None
+
+    def test_master_grant_invalid_key(self, mestre_s, membro_s):
+        me = _me(membro_s["token"])
+        r = requests.post(f"{API}/master/users/{me['id']}/passport/does_not_exist",
+                        headers=_h(mestre_s["token"]))
+        assert r.status_code == 404
+
+    def test_non_master_cannot_grant(self, formador_s, membro_s):
+        me = _me(membro_s["token"])
+        r = requests.post(f"{API}/master/users/{me['id']}/passport/primeiro_retiro",
+                        headers=_h(formador_s["token"]))
+        assert r.status_code == 403
+
+    def test_lesson_completion_awards_milestone(self, membro_s, mestre_s):
+        me = _me(membro_s["token"])
+        _reset_membro_to_stage_3(mestre_s["token"], me["id"])
+        # complete some lesson
+        mods = requests.get(f"{API}/stages/3/modules", headers=_h(membro_s["token"])).json()
+        if mods.get("modules") and mods["modules"][0].get("lessons"):
+            lid = mods["modules"][0]["lessons"][0]["id"]
+            requests.post(f"{API}/lessons/{lid}/progress",
+                        json={"completed": True, "percent": 100}, headers=_h(membro_s["token"]))
+            p = requests.get(f"{API}/passport", headers=_h(membro_s["token"])).json()
+            pf = next(i for i in p["items"] if i["key"] == "primeira_formacao")
+            assert pf["earned"] is True
+
+
+# ---------------- ITERATION 5: Relatório Pastoral ----------------
+class TestPastoralReport:
+    def test_pastoral_report_shape(self, mestre_s, membro_s):
+        me = _me(membro_s["token"])
+        _reset_membro_to_stage_3(mestre_s["token"], me["id"])
+        # Ensure membro is concluded (complete all stage 3 lessons + lives)
+        mods = requests.get(f"{API}/stages/3/modules", headers=_h(membro_s["token"])).json()
+        for m in mods["modules"]:
+            for l in m["lessons"]:
+                requests.post(f"{API}/lessons/{l['id']}/progress",
+                            json={"completed": True, "percent": 100}, headers=_h(membro_s["token"]))
+        buckets = requests.get(f"{API}/lives", headers=_h(membro_s["token"])).json()
+        for k in buckets:
+            for l in buckets[k]:
+                if l.get("stage_order") == 3 and l.get("required"):
+                    requests.post(f"{API}/lives/{l['id']}/presence",
+                                json={"percent": 100}, headers=_h(membro_s["token"]))
+
+        r = requests.get(f"{API}/master/pastoral-report", headers=_h(mestre_s["token"]))
+        assert r.status_code == 200
+        data = r.json()
+        assert "by_stage" in data and "awaiting" in data
+        assert "awaiting_count" in data and "total_membros" in data
+        assert isinstance(data["by_stage"], list)
+        for b in data["by_stage"]:
+            for k in ("order", "stage", "total", "concluded"):
+                assert k in b
+        # membro should appear in awaiting (100% stage 3)
+        assert any(a["id"] == me["id"] for a in data["awaiting"]), \
+            f"membro should be in awaiting: {[a['name'] for a in data['awaiting']]}"
+        member = next(a for a in data["awaiting"] if a["id"] == me["id"])
+        assert member["order"] == 3
+        assert "formador" in member
+        assert data["awaiting_count"] == len(data["awaiting"])
+
+    @pytest.mark.parametrize("role_key", ["formador_s", "membro_s", "admin_s"])
+    def test_non_master_forbidden(self, request, role_key):
+        s = request.getfixturevalue(role_key)
+        r = requests.get(f"{API}/master/pastoral-report", headers=_h(s["token"]))
+        assert r.status_code == 403
+
+
+# ---------------- ITERATION 5: Notificações Central ----------------
+class TestNotificationsCentral:
+    def test_get_notifications_returns_list(self, membro_s):
+        r = requests.get(f"{API}/notifications", headers=_h(membro_s["token"]))
+        assert r.status_code == 200
+        assert isinstance(r.json(), list)
+
+    def test_mark_read(self, mestre_s, membro_s):
+        me = _me(membro_s["token"])
+        _reset_membro_to_stage_3(mestre_s["token"], me["id"])
+        # Trigger a notification via stage change
+        requests.post(f"{API}/master/users/{me['id']}/stage",
+                    json={"new_stage_order": 4, "reason": "TEST notif central", "action": "change"},
+                    headers=_h(mestre_s["token"]))
+        try:
+            before = requests.get(f"{API}/notifications", headers=_h(membro_s["token"])).json()
+            assert len(before) >= 1
+            unread_before = sum(1 for n in before if not n.get("read"))
+            assert unread_before >= 1
+
+            r = requests.post(f"{API}/notifications/read", headers=_h(membro_s["token"]))
+            assert r.status_code == 200
+
+            after = requests.get(f"{API}/notifications", headers=_h(membro_s["token"])).json()
+            unread_after = sum(1 for n in after if not n.get("read"))
+            assert unread_after == 0
+        finally:
+            requests.post(f"{API}/master/users/{me['id']}/stage",
+                        json={"new_stage_order": 3, "reason": "TEST rollback", "action": "change"},
+                        headers=_h(mestre_s["token"]))
+
+    def test_notifications_ordered_desc(self, membro_s):
+        items = requests.get(f"{API}/notifications", headers=_h(membro_s["token"])).json()
+        if len(items) >= 2:
+            for i in range(len(items) - 1):
+                assert items[i].get("at", "") >= items[i + 1].get("at", ""), "must be sorted desc by at"
+
+
 # ---------------- AI smoke check ----------------
 class TestAISmoke:
     def test_assistant_responds(self, membro_s):
@@ -452,3 +636,309 @@ class TestAISmoke:
                           headers=_h(membro_s["token"]), timeout=90)
         assert r.status_code == 200
         assert len(r.json().get("answer", "")) > 20
+
+
+# ---------------- ITERATION 6 — GRANULAR PERMISSIONS / CONTENT / LIVES ----------------
+PREVOC = {"email": "prevocacionado@caminho.app", "password": "***REMOVED***"}
+
+DEMO_FORMADOR_PERMS = [
+    "CREATE_COURSE", "CREATE_MODULE", "CREATE_LESSON", "PUBLISH_LESSON",
+    "UPLOAD_VIDEO", "UPLOAD_AUDIO", "UPLOAD_DOCUMENT",
+    "CREATE_ANNOUNCEMENT", "DELETE_ANNOUNCEMENT",
+    "CREATE_LIVE", "EDIT_LIVE", "START_LIVE", "END_LIVE", "MODERATE_LIVE",
+    "VIEW_ANALYTICS",
+]
+
+
+@pytest.fixture(scope="session")
+def prevoc_s():
+    return _login(PREVOC)
+
+
+def _get_formador_perms(mestre_token, fid):
+    r = requests.get(f"{API}/master/formadores-permissions", headers=_h(mestre_token))
+    for f in r.json():
+        if f["id"] == fid:
+            return f["permissions"]
+    return []
+
+
+def _set_perms(mestre_token, fid, perms):
+    r = requests.put(f"{API}/master/formadores/{fid}/permissions",
+                     json={"permissions": perms}, headers=_h(mestre_token))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+@pytest.fixture(scope="session")
+def formador_id(formador_s):
+    return _me(formador_s["token"])["id"]
+
+
+@pytest.fixture(scope="session")
+def restore_formador_perms(mestre_s, formador_id):
+    """Snapshot demo formador perms; restore on teardown."""
+    original = _get_formador_perms(mestre_s["token"], formador_id)
+    yield original
+    _set_perms(mestre_s["token"], formador_id, original or DEMO_FORMADOR_PERMS)
+
+
+# ------ TESTE 1 & 2: create_course permission gating ------
+class TestCoursesPermission:
+    def test_membro_cannot_create_course(self, membro_s):
+        r = requests.post(f"{API}/courses",
+                          json={"title": "TEST curso membro", "stages": [3], "publish": True},
+                          headers=_h(membro_s["token"]))
+        assert r.status_code == 403
+
+    def test_formador_authorized_creates_course(self, formador_s):
+        r = requests.post(f"{API}/courses",
+                          json={"title": "TEST curso formador", "stages": [3], "publish": True},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert "id" in data
+        assert data["title"] == "TEST curso formador"
+        assert data["status"] == "published"
+
+    def test_formador_without_create_course_denied(self, mestre_s, formador_s, formador_id, restore_formador_perms):
+        # revoke CREATE_COURSE
+        reduced = [p for p in restore_formador_perms if p != "CREATE_COURSE"]
+        _set_perms(mestre_s["token"], formador_id, reduced)
+        # re-login so JWT/user fetched again picks up perms (backend reads DB each request via get_current_user)
+        tok = _login(FORMADOR)["token"]
+        r = requests.post(f"{API}/courses",
+                          json={"title": "TEST denied", "stages": [3], "publish": True},
+                          headers=_h(tok))
+        assert r.status_code == 403
+        # restore
+        _set_perms(mestre_s["token"], formador_id, restore_formador_perms)
+
+
+# ------ TESTE 3 & 4: ownership + EDIT_ALL_CONTENT ------
+class TestLessonOwnershipEdit:
+    def _create_second_formador(self, admin_s, mestre_s):
+        """Promote prevocacionado -> formador (using admin PATCH). Returns (user_id, login token)."""
+        # find prevoc user
+        users = requests.get(f"{API}/admin/users", headers=_h(admin_s["token"])).json()
+        u = next(x for x in users if x["email"] == PREVOC["email"])
+        original_role = u["role"]
+        original_stage = u["current_stage_order"]
+        # promote
+        r = requests.patch(f"{API}/admin/users/{u['id']}",
+                          json={"role": "formador"}, headers=_h(admin_s["token"]))
+        assert r.status_code == 200
+        return u["id"], original_role, original_stage
+
+    def _restore_user(self, admin_s, mestre_s, uid, original_role, original_stage):
+        requests.patch(f"{API}/admin/users/{uid}",
+                       json={"role": original_role}, headers=_h(admin_s["token"]))
+        # if the user was a membro, ensure stage restored via mestre (should not have changed but be safe)
+        if original_role == "membro":
+            _reset = requests.get(f"{API}/master/users/{uid}", headers=_h(mestre_s["token"])).json()
+            if _reset.get("current_stage_order") != original_stage:
+                requests.post(f"{API}/master/users/{uid}/stage",
+                              json={"new_stage_order": original_stage, "reason": "TEST restore", "action": "change"},
+                              headers=_h(mestre_s["token"]))
+        # clear permissions we added
+        requests.put(f"{API}/master/formadores/{uid}/permissions",
+                     json={"permissions": []}, headers=_h(mestre_s["token"]))
+
+    def test_ownership_and_edit_all_content(self, admin_s, mestre_s, formador_s, formador_id, restore_formador_perms):
+        # ensure a module exists (created by demo formador with CREATE_MODULE)
+        mod = requests.post(f"{API}/modules",
+                            json={"stage_order": 3, "title": "TEST mod owner", "description": ""},
+                            headers=_h(formador_s["token"]))
+        assert mod.status_code == 200, mod.text
+        module_id = mod.json()["id"]
+
+        # create lesson owned by demo formador
+        les = requests.post(f"{API}/lessons",
+                            json={"module_id": module_id, "title": "TEST aula owner",
+                                  "stage_order": 3, "publish": True},
+                            headers=_h(formador_s["token"]))
+        assert les.status_code == 200, les.text
+        lesson_id = les.json()["id"]
+
+        # create second formador
+        uid, orig_role, orig_stage = self._create_second_formador(admin_s, mestre_s)
+        try:
+            # grant only EDIT_LESSON (NOT EDIT_ALL_CONTENT)
+            _set_perms(mestre_s["token"], uid, ["EDIT_LESSON"])
+            tok2 = _login(PREVOC)["token"]
+
+            # TESTE 3: edit denied (owner mismatch, no EDIT_ALL_CONTENT)
+            r = requests.patch(f"{API}/lessons/{lesson_id}",
+                               json={"title": "TEST hijack"}, headers=_h(tok2))
+            assert r.status_code == 403, f"expected 403 got {r.status_code} {r.text}"
+
+            # TESTE 4: grant EDIT_ALL_CONTENT
+            _set_perms(mestre_s["token"], uid, ["EDIT_LESSON", "EDIT_ALL_CONTENT"])
+            tok2 = _login(PREVOC)["token"]
+            r2 = requests.patch(f"{API}/lessons/{lesson_id}",
+                                json={"title": "TEST edited by other"}, headers=_h(tok2))
+            assert r2.status_code == 200, r2.text
+        finally:
+            self._restore_user(admin_s, mestre_s, uid, orig_role, orig_stage)
+
+
+# ------ TESTE 5, 6, 13: Lives lifecycle ------
+class TestLivesLifecycle:
+    def test_create_live_without_start_perm_cannot_start(self, mestre_s, formador_s, formador_id, restore_formador_perms):
+        # grant CREATE_LIVE but remove START_LIVE
+        perms = [p for p in restore_formador_perms if p != "START_LIVE"]
+        if "CREATE_LIVE" not in perms:
+            perms.append("CREATE_LIVE")
+        _set_perms(mestre_s["token"], formador_id, perms)
+        tok = _login(FORMADOR)["token"]
+        try:
+            r = requests.post(f"{API}/lives",
+                              json={"title": "TEST live no-start", "stages": [3]},
+                              headers=_h(tok))
+            assert r.status_code == 200, r.text
+            lid = r.json()["id"]
+            s = requests.post(f"{API}/lives/{lid}/start", headers=_h(tok))
+            assert s.status_code == 403
+        finally:
+            _set_perms(mestre_s["token"], formador_id, restore_formador_perms)
+
+    def test_start_and_end_live(self, mestre_s, formador_s, membro_s, prevoc_s, restore_formador_perms, formador_id):
+        # ensure demo perms
+        _set_perms(mestre_s["token"], formador_id, restore_formador_perms)
+        tok = _login(FORMADOR)["token"]
+
+        # create stage-3 live
+        r = requests.post(f"{API}/lives",
+                          json={"title": "TEST live stage3", "stages": [3], "presenter": "Maria"},
+                          headers=_h(tok))
+        assert r.status_code == 200
+        lid = r.json()["id"]
+
+        # membro (stage3) baseline notifications count
+        n_before = len(requests.get(f"{API}/notifications", headers=_h(membro_s["token"])).json())
+
+        # start
+        s = requests.post(f"{API}/lives/{lid}/start", headers=_h(tok))
+        assert s.status_code == 200, s.text
+        assert s.json()["status"] == "live"
+
+        # TESTE 9: stage-1 member does NOT see this live in any bucket
+        buckets_prevoc = requests.get(f"{API}/lives", headers=_h(prevoc_s["token"])).json()
+        all_ids_prevoc = [x["id"] for k in ("live_now", "upcoming", "recorded") for x in buckets_prevoc.get(k, [])]
+        assert lid not in all_ids_prevoc
+
+        # TESTE 10: stage-3 member sees it in live_now
+        buckets_membro = requests.get(f"{API}/lives", headers=_h(membro_s["token"])).json()
+        assert any(x["id"] == lid for x in buckets_membro["live_now"])
+
+        # notification created for stage-3 members
+        notes = requests.get(f"{API}/notifications", headers=_h(membro_s["token"])).json()
+        assert len(notes) > n_before
+        assert any("Ao vivo" in (n.get("title", "") + n.get("body", "")) for n in notes[:5])
+
+        # end
+        e = requests.post(f"{API}/lives/{lid}/end", headers=_h(tok))
+        assert e.status_code == 200, e.text
+
+        # verify status ended
+        buckets_after = requests.get(f"{API}/lives", headers=_h(tok))
+        assert buckets_after.status_code == 200
+        found = None
+        for k in ("live_now", "upcoming", "recorded"):
+            for x in buckets_after.json().get(k, []):
+                if x["id"] == lid:
+                    found = x
+                    break
+        assert found is not None
+        assert found["status"] == "ended"
+        # duration_min may be 0 (started/ended in the same minute) but must be an int if present
+        if found.get("duration_min") is not None:
+            assert isinstance(found["duration_min"], int)
+
+
+# ------ TESTE 7 & 8: stage invariant ------
+class TestStageInvariant:
+    def test_formador_cannot_change_stage(self, formador_s, membro_s):
+        me = _me(membro_s["token"])
+        before = me["current_stage_order"]
+        r = requests.post(f"{API}/master/users/{me['id']}/stage",
+                          json={"new_stage_order": 5, "reason": "hack", "action": "change"},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 403
+        # unchanged
+        after = _me(membro_s["token"])["current_stage_order"]
+        assert after == before
+
+    def test_mestre_stage_change_requires_reason(self, mestre_s, membro_s):
+        me = _me(membro_s["token"])
+        _reset_membro_to_stage_3(mestre_s["token"], me["id"])
+        # empty reason -> 400/422
+        r = requests.post(f"{API}/master/users/{me['id']}/stage",
+                          json={"new_stage_order": 4, "reason": "", "action": "change"},
+                          headers=_h(mestre_s["token"]))
+        assert r.status_code in (400, 422), f"expected 4xx got {r.status_code}"
+
+        # valid change
+        r2 = requests.post(f"{API}/master/users/{me['id']}/stage",
+                           json={"new_stage_order": 4, "reason": "TEST invariant", "action": "change"},
+                           headers=_h(mestre_s["token"]))
+        assert r2.status_code == 200
+        # rollback
+        requests.post(f"{API}/master/users/{me['id']}/stage",
+                      json={"new_stage_order": 3, "reason": "TEST rollback", "action": "change"},
+                      headers=_h(mestre_s["token"]))
+
+
+# ------ Permissions Management endpoints ------
+class TestPermissionsMgmt:
+    def test_list_formadores_permissions_master_only(self, mestre_s, formador_s, membro_s):
+        r_m = requests.get(f"{API}/master/formadores-permissions", headers=_h(mestre_s["token"]))
+        assert r_m.status_code == 200
+        assert isinstance(r_m.json(), list) and len(r_m.json()) >= 1
+        # non-master denied
+        assert requests.get(f"{API}/master/formadores-permissions", headers=_h(formador_s["token"])).status_code == 403
+        assert requests.get(f"{API}/master/formadores-permissions", headers=_h(membro_s["token"])).status_code == 403
+
+    def test_put_permissions_master_only(self, mestre_s, formador_s, membro_s, formador_id, restore_formador_perms):
+        # invalid perm string is filtered out (kept only if in ALL_PERMISSIONS)
+        r = requests.put(f"{API}/master/formadores/{formador_id}/permissions",
+                         json={"permissions": ["CREATE_COURSE", "NOT_A_REAL_PERM"]},
+                         headers=_h(mestre_s["token"]))
+        assert r.status_code == 200
+        assert set(r.json()["permissions"]) == {"CREATE_COURSE"}
+
+        # non-master denied
+        assert requests.put(f"{API}/master/formadores/{formador_id}/permissions",
+                            json={"permissions": []}, headers=_h(formador_s["token"])).status_code == 403
+        assert requests.put(f"{API}/master/formadores/{formador_id}/permissions",
+                            json={"permissions": []}, headers=_h(membro_s["token"])).status_code == 403
+
+        # restore
+        _set_perms(mestre_s["token"], formador_id, restore_formador_perms)
+
+
+# ------ Announcements ------
+class TestAnnouncements:
+    def test_create_and_list_and_stage_filter(self, mestre_s, formador_s, membro_s, prevoc_s, formador_id, restore_formador_perms):
+        _set_perms(mestre_s["token"], formador_id, restore_formador_perms)
+        tok = _login(FORMADOR)["token"]
+        r = requests.post(f"{API}/announcements",
+                          json={"title": "TEST aviso stage3", "message": "Somente etapa 3",
+                                "stages": [3], "publish": True},
+                          headers=_h(tok))
+        assert r.status_code == 200, r.text
+        aid = r.json()["id"]
+
+        # stage 3 member sees it
+        m3 = requests.get(f"{API}/announcements", headers=_h(membro_s["token"])).json()
+        assert any(a["id"] == aid for a in m3)
+
+        # stage 1 member does NOT see it
+        m1 = requests.get(f"{API}/announcements", headers=_h(prevoc_s["token"])).json()
+        assert not any(a["id"] == aid for a in m1)
+
+    def test_member_cannot_create_announcement(self, membro_s):
+        r = requests.post(f"{API}/announcements",
+                          json={"title": "TEST hack", "message": "no", "publish": True},
+                          headers=_h(membro_s["token"]))
+        assert r.status_code == 403

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, apiError } from "../lib/api";
 import { Shell } from "../components/Shell";
-import { ArrowLeft, Loader2, Crown, Search, Check, X, History, Settings } from "lucide-react";
+import { ArrowLeft, Loader2, Crown, Search, Check, X, History, Settings, ClipboardList, SlidersHorizontal, Lock } from "lucide-react";
 import { toast } from "sonner";
 
 const STAGES = ["Pré-Vocacionado", "Vocacionado", "Discípulo Ano 1", "Discípulo Ano 2", "Compromissado", "Consagrado"];
@@ -62,6 +62,18 @@ export default function MasterControl() {
         <button data-testid="back-button" onClick={() => nav(-1)} className="flex items-center gap-1 text-stone-400 mb-4 text-sm"><ArrowLeft className="w-4 h-4" /> Voltar</button>
         <div className="flex items-center gap-2 mb-1"><Crown className="w-6 h-6 text-orange-500" /><h1 className="font-heading font-black text-3xl tracking-tight">Controle Mestre</h1></div>
         <p className="text-stone-500 text-sm mb-5">Autoridade exclusiva sobre as etapas de formação. Toda decisão exige motivo e é auditada.</p>
+
+        <div className="grid grid-cols-2 gap-3 mb-6">
+          <button data-testid="master-report-btn" onClick={() => nav("/app/mestre/relatorio")} className="rounded-xl border border-stone-800 bg-stone-900 p-4 text-left active:scale-[0.99] transition-transform">
+            <ClipboardList className="w-5 h-5 text-orange-500 mb-1" /><p className="font-heading font-bold text-sm">Relatório Pastoral</p><p className="text-[11px] text-stone-500">Quem concluiu e aguarda</p>
+          </button>
+          <button data-testid="master-reqs-btn" onClick={() => nav("/app/mestre/requisitos")} className="rounded-xl border border-stone-800 bg-stone-900 p-4 text-left active:scale-[0.99] transition-transform">
+            <SlidersHorizontal className="w-5 h-5 text-orange-500 mb-1" /><p className="font-heading font-bold text-sm">Requisitos por Etapa</p><p className="text-[11px] text-stone-500">O que conta como concluída</p>
+          </button>
+          <button data-testid="master-perms-btn" onClick={() => nav("/app/mestre/permissoes")} className="rounded-xl border border-stone-800 bg-stone-900 p-4 text-left active:scale-[0.99] transition-transform">
+            <Lock className="w-5 h-5 text-orange-500 mb-1" /><p className="font-heading font-bold text-sm">Permissões</p><p className="text-[11px] text-stone-500">Conteúdo e lives por formador</p>
+          </button>
+        </div>
 
         {settings && (
           <div className="rounded-xl border border-stone-800 bg-stone-900 p-4 mb-6 flex items-center gap-3">
