@@ -17,6 +17,16 @@ Prioridades absolutas do projeto: **1) segurança das etapas, 2) acompanhamento 
 ## Etapas (enum, ordem 1→6)
 PRE_VOCACIONADO → VOCACIONADO → DISCIPULO_ANO_1 → DISCIPULO_ANO_2 → COMPROMISSADO → CONSAGRADO. Cada uma com tema, pergunta, ícone, descrição.
 
+## Implementado (2026-06 — iteração 7) ✅ Central de Mídia Externa (embed oficial)
+- **Modo embed-only** (opção escolhida pelo usuário): armazena **apenas** URL/provider/external_id/metadados. NUNCA baixa, copia ou faz scraping de vídeo.
+- **Adaptadores** (`MediaProvider` base + `YouTubeProvider` + `VimeoProvider`) — arquitetura pronta para novos provedores/APIs oficiais no futuro. Detecção/normalização de URL: YouTube `watch?v=`, `youtu.be/`, `live/`, `embed/`, `shorts/`; Vimeo `vimeo.com/ID` e `player.vimeo.com/video/ID`.
+- **Endpoints**: `POST /api/media/parse` (valida/normaliza; 400 para URL inválida e provedor não suportado; requer `MANAGE_EXTERNAL_MEDIA`), `POST/GET/PATCH/DELETE /api/external-media`, `GET /api/external-media/{id}` (bloqueio por etapa oficial no backend + registro de histórico "acessado"), `/favorite` (toggle), `/favorites`, `/history`, `/{id}/live-status`, `GET /api/media/providers`, `PUT /api/master/media/providers` (config do Mestre).
+- **Acesso por ETAPA OFICIAL** (`media_accessible`, nunca por progresso). Status de live externa: draft/scheduled/waiting/live/ended/unavailable; ao virar `live` notifica membros. Player oficial via iframe + fallback "Abrir na plataforma". Auditoria nas ações.
+- **UI**: `/app/midia` (Central de Mídia — tabs Todos/Vídeos/Lives/Favoritos/Histórico + busca), `/app/midia/:id` (assistir com iframe/fallback/favorito), `/app/midia/gerenciar` (formador/mestre: cadastro, etapas, status de live; Mestre configura provedores). Link no Perfil.
+- **Permissão**: nova `MANAGE_EXTERNAL_MEDIA` (só Mestre concede). Formador demo recebeu a permissão.
+- **Melhorias**: `/api/notifications` agora aceita `since`/`limit`; des-favoritar permitido mesmo sem acesso atual.
+- Testado: 11/11 novos testes backend + 16/16 checkpoints UI (100%). Invariante "etapa ≠ progresso" preservado.
+
 ## Implementado (2026-06 — iteração 1) ✅
 - **Autenticação**: registro, login, logout, /me, recuperar senha (stub), onboarding de 1º acesso (4 telas). Rotas protegidas por sessão e por papel.
 - **Segurança das etapas (backend)**: usuário acessa apenas etapas com ordem ≤ sua etapa atual; etapas superiores retornam 403. Aulas e progresso também validados. `require_roles` protege endpoints de formador/admin. (Validado: 403/401 corretos.)

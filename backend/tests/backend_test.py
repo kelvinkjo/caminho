@@ -942,3 +942,186 @@ class TestAnnouncements:
                           json={"title": "TEST hack", "message": "no", "publish": True},
                           headers=_h(membro_s["token"]))
         assert r.status_code == 403
+
+
+
+# ------ Central de Mídia Externa (iteration 7) ------
+class TestMediaParse:
+    def test_parse_youtube_watch(self, formador_s):
+        r = requests.post(f"{API}/media/parse",
+                          json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert j["provider"] == "youtube"
+        assert j["external_id"] == "dQw4w9WgXcQ"
+        assert j["embed_url"] == "https://www.youtube.com/embed/dQw4w9WgXcQ"
+        assert j["watch_url"] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        assert j["can_embed"] is True
+
+    def test_parse_youtube_short(self, formador_s):
+        r = requests.post(f"{API}/media/parse",
+                          json={"url": "https://youtu.be/dQw4w9WgXcQ"},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200
+        assert r.json()["external_id"] == "dQw4w9WgXcQ"
+
+    def test_parse_youtube_live(self, formador_s):
+        r = requests.post(f"{API}/media/parse",
+                          json={"url": "https://www.youtube.com/live/abcdefghijk"},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200
+        assert r.json()["provider"] == "youtube"
+        assert r.json()["external_id"] == "abcdefghijk"
+
+    def test_parse_vimeo(self, formador_s):
+        r = requests.post(f"{API}/media/parse",
+                          json={"url": "https://vimeo.com/76979871"},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200
+        j = r.json()
+        assert j["provider"] == "vimeo"
+        assert j["external_id"] == "76979871"
+        assert j["embed_url"] == "https://player.vimeo.com/video/76979871"
+
+    def test_parse_vimeo_player(self, formador_s):
+        r = requests.post(f"{API}/media/parse",
+                          json={"url": "https://player.vimeo.com/video/76979871"},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200
+        assert r.json()["external_id"] == "76979871"
+
+    def test_parse_invalid_url(self, formador_s):
+        r = requests.post(f"{API}/media/parse", json={"url": "not-a-url"},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 400
+        assert "inválida" in r.json().get("detail", "").lower()
+
+    def test_parse_unsupported_provider(self, formador_s):
+        r = requests.post(f"{API}/media/parse",
+                          json={"url": "https://www.dailymotion.com/video/x7tgad0"},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 400
+        assert "não suportado" in r.json().get("detail", "").lower() or "nao suportado" in r.json().get("detail", "").lower()
+
+    def test_parse_forbidden_for_member(self, membro_s):
+        r = requests.post(f"{API}/media/parse",
+                          json={"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+                          headers=_h(membro_s["token"]))
+        assert r.status_code == 403
+
+
+class TestExternalMediaCRUDAndAccess:
+    def test_create_and_stage_access_control(self, formador_s, prevoc_s, mestre_s):
+        # Use prevoc (stable stage 1) as the "member" subject to avoid races with
+        # TestMasterChange that toggles membro's stage in parallel workers.
+        prevoc_tok = prevoc_s["token"]
+        # Formador creates stage-1 restricted VIDEO
+        r = requests.post(f"{API}/external-media", headers=_h(formador_s["token"]),
+                          json={"url": "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+                                "title": "TEST midia etapa1 video", "kind": "video",
+                                "stages": [1], "publish": True})
+        assert r.status_code == 200, r.text
+        mid_stage1 = r.json()["id"]
+        assert r.json()["provider"] == "youtube"
+        assert r.json()["stages"] == [1]
+
+        # Formador creates a stage-3 restricted VIDEO
+        r = requests.post(f"{API}/external-media", headers=_h(formador_s["token"]),
+                          json={"url": "https://youtu.be/bbbbbbbbbbb",
+                                "title": "TEST midia etapa3 video", "kind": "video",
+                                "stages": [3], "publish": True})
+        assert r.status_code == 200, r.text
+        mid_stage3 = r.json()["id"]
+
+        # LIST — prevoc (etapa 1) should see stage1 but NOT stage3
+        lst = requests.get(f"{API}/external-media", headers=_h(prevoc_tok)).json()
+        ids = {x["id"] for x in lst}
+        assert mid_stage1 in ids
+        assert mid_stage3 not in ids
+
+        # GET detail: prevoc on stage3 media -> 403
+        r = requests.get(f"{API}/external-media/{mid_stage3}", headers=_h(prevoc_tok))
+        assert r.status_code == 403
+
+        # GET detail: prevoc on stage1 media -> 200 + history registered
+        r = requests.get(f"{API}/external-media/{mid_stage1}", headers=_h(prevoc_tok))
+        assert r.status_code == 200
+        assert r.json()["id"] == mid_stage1
+        hist = requests.get(f"{API}/external-media/history", headers=_h(prevoc_tok)).json()
+        assert any(h["id"] == mid_stage1 for h in hist)
+
+        # Favorite toggle
+        r = requests.post(f"{API}/external-media/{mid_stage1}/favorite", headers=_h(prevoc_tok))
+        assert r.status_code == 200 and r.json()["favorited"] is True
+        favs = requests.get(f"{API}/external-media/favorites", headers=_h(prevoc_tok)).json()
+        assert any(f["id"] == mid_stage1 for f in favs)
+        r = requests.post(f"{API}/external-media/{mid_stage1}/favorite", headers=_h(prevoc_tok))
+        assert r.json()["favorited"] is False
+
+        # Prevoc (membro) cannot favorite stage3 media (403)
+        r = requests.post(f"{API}/external-media/{mid_stage3}/favorite", headers=_h(prevoc_tok))
+        assert r.status_code == 403
+
+        # Cleanup
+        for x in (mid_stage1, mid_stage3):
+            requests.delete(f"{API}/external-media/{x}", headers=_h(formador_s["token"]))
+
+    def test_live_status_lifecycle_and_notify(self, formador_s, membro_s):
+        # Create a live for stage 3
+        r = requests.post(f"{API}/external-media", headers=_h(formador_s["token"]),
+                          json={"url": "https://www.youtube.com/live/liveid00001"[:47],
+                                "title": "TEST live externa",
+                                "kind": "live", "stages": [3],
+                                "live_status": "scheduled", "publish": True})
+        if r.status_code != 200:
+            r = requests.post(f"{API}/external-media", headers=_h(formador_s["token"]),
+                              json={"url": "https://www.youtube.com/live/lllllllllll",
+                                    "title": "TEST live externa",
+                                    "kind": "live", "stages": [3],
+                                    "live_status": "scheduled", "publish": True})
+        assert r.status_code == 200, r.text
+        lid = r.json()["id"]
+
+        # Invalid status
+        r = requests.post(f"{API}/external-media/{lid}/live-status",
+                          json={"live_status": "bogus"}, headers=_h(formador_s["token"]))
+        assert r.status_code == 400
+
+        # Go live -> should notify stage-3 members
+        r = requests.post(f"{API}/external-media/{lid}/live-status",
+                          json={"live_status": "live"}, headers=_h(formador_s["token"]))
+        assert r.status_code == 200 and r.json()["live_status"] == "live"
+
+        notifs = requests.get(f"{API}/notifications", headers=_h(membro_s["token"])).json()
+        assert any("ao vivo" in (n.get("title", "") + n.get("message", "")).lower() for n in notifs)
+
+        # Membro cannot change live status
+        r = requests.post(f"{API}/external-media/{lid}/live-status",
+                          json={"live_status": "ended"}, headers=_h(membro_s["token"]))
+        assert r.status_code == 403
+
+        # End
+        r = requests.post(f"{API}/external-media/{lid}/live-status",
+                          json={"live_status": "ended"}, headers=_h(formador_s["token"]))
+        assert r.status_code == 200
+
+        requests.delete(f"{API}/external-media/{lid}", headers=_h(formador_s["token"]))
+
+    def test_providers_endpoints(self, mestre_s, membro_s):
+        r = requests.get(f"{API}/media/providers", headers=_h(membro_s["token"]))
+        assert r.status_code == 200
+        keys = {p["key"] for p in r.json()["providers"]}
+        assert {"youtube", "vimeo"} <= keys
+
+        # Only mestre can set providers
+        r = requests.put(f"{API}/master/media/providers",
+                         json={"enabled": ["youtube", "vimeo"]},
+                         headers=_h(membro_s["token"]))
+        assert r.status_code in (401, 403)
+
+        r = requests.put(f"{API}/master/media/providers",
+                         json={"enabled": ["youtube", "vimeo"]},
+                         headers=_h(mestre_s["token"]))
+        assert r.status_code == 200
+        assert set(r.json()["enabled"]) == {"youtube", "vimeo"}

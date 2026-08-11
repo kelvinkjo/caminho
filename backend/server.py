@@ -11,7 +11,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
-import logging, uuid, bcrypt, jwt
+import logging, uuid, bcrypt, jwt, re
 
 try:
     from emergentintegrations.llm.chat import LlmChat, UserMessage
@@ -583,8 +583,11 @@ async def put_settings(body: SettingsIn, master: dict = Depends(require_master))
 
 # ---------------- notifications ----------------
 @api.get("/notifications")
-async def get_notifications(user: dict = Depends(get_current_user)):
-    items = await db.notifications.find({"user_id": user["id"]}).sort("at", -1).to_list(50)
+async def get_notifications(since: Optional[str] = None, limit: int = 100, user: dict = Depends(get_current_user)):
+    q = {"user_id": user["id"]}
+    if since:
+        q["at"] = {"$gt": since}
+    items = await db.notifications.find(q).sort("at", -1).to_list(max(1, min(limit, 500)))
     for i in items:
         i.pop("_id", None)
     return items
@@ -856,7 +859,7 @@ ALL_PERMISSIONS = [
     "UPLOAD_VIDEO", "UPLOAD_AUDIO", "UPLOAD_DOCUMENT",
     "CREATE_ANNOUNCEMENT", "EDIT_ANNOUNCEMENT", "DELETE_ANNOUNCEMENT", "PUBLISH_ANNOUNCEMENT",
     "CREATE_LIVE", "EDIT_LIVE", "START_LIVE", "END_LIVE", "MODERATE_LIVE",
-    "VIEW_ANALYTICS", "MANAGE_CONTENT_ACCESS", "EDIT_ALL_CONTENT",
+    "VIEW_ANALYTICS", "MANAGE_CONTENT_ACCESS", "EDIT_ALL_CONTENT", "MANAGE_EXTERNAL_MEDIA",
 ]
 
 def has_perm(user: dict, perm: str) -> bool:
@@ -1111,6 +1114,316 @@ async def end_live(lid: str, user: dict = Depends(require_perm("END_LIVE"))):
     await audit("end_live", user, live_id=lid, duration_min=dur)
     return {"ok": True, "status": "ended", "duration_min": dur}
 
+# ================= CENTRAL DE MÍDIA EXTERNA (embed oficial) =================
+# Só armazena URL/provider/ID/metadados. NUNCA baixa, copia ou faz scraping de vídeo.
+# Arquitetura de adaptadores pronta para futuros provedores/APIs oficiais.
+
+LIVE_STATUSES = ["draft", "scheduled", "waiting", "live", "ended", "unavailable"]
+
+class MediaProvider:
+    key = "base"
+    name = "Base"
+    embeddable = True
+    _patterns: List = []
+
+    @classmethod
+    def matches(cls, url: str) -> bool:
+        return any(p.search(url) for p in cls._patterns)
+
+    @classmethod
+    def extract_id(cls, url: str) -> Optional[str]:
+        for p in cls._patterns:
+            m = p.search(url)
+            if m:
+                return m.group(1)
+        return None
+
+    @classmethod
+    def embed_url(cls, ext_id: str) -> str:
+        raise NotImplementedError
+
+    @classmethod
+    def watch_url(cls, ext_id: str) -> str:
+        raise NotImplementedError
+
+    @classmethod
+    def thumbnail(cls, ext_id: str) -> str:
+        return ""
+
+
+class YouTubeProvider(MediaProvider):
+    key = "youtube"
+    name = "YouTube"
+    embeddable = True
+    _patterns = [
+        re.compile(r"(?:youtube\.com/watch\?(?:.*&)?v=)([\w-]{11})"),
+        re.compile(r"(?:youtu\.be/)([\w-]{11})"),
+        re.compile(r"(?:youtube\.com/live/)([\w-]{11})"),
+        re.compile(r"(?:youtube\.com/embed/)([\w-]{11})"),
+        re.compile(r"(?:youtube\.com/shorts/)([\w-]{11})"),
+    ]
+
+    @classmethod
+    def embed_url(cls, ext_id: str) -> str:
+        return f"https://www.youtube.com/embed/{ext_id}"
+
+    @classmethod
+    def watch_url(cls, ext_id: str) -> str:
+        return f"https://www.youtube.com/watch?v={ext_id}"
+
+    @classmethod
+    def thumbnail(cls, ext_id: str) -> str:
+        return f"https://img.youtube.com/vi/{ext_id}/hqdefault.jpg"
+
+
+class VimeoProvider(MediaProvider):
+    key = "vimeo"
+    name = "Vimeo"
+    embeddable = True
+    _patterns = [
+        re.compile(r"(?:player\.vimeo\.com/video/)(\d+)"),
+        re.compile(r"(?:vimeo\.com/)(\d+)"),
+    ]
+
+    @classmethod
+    def embed_url(cls, ext_id: str) -> str:
+        return f"https://player.vimeo.com/video/{ext_id}"
+
+    @classmethod
+    def watch_url(cls, ext_id: str) -> str:
+        return f"https://vimeo.com/{ext_id}"
+
+
+PROVIDERS = [YouTubeProvider, VimeoProvider]
+
+async def enabled_providers() -> List[str]:
+    s = await db.settings.find_one({"key": "media_providers"})
+    if not s:
+        return [p.key for p in PROVIDERS]
+    return s.get("enabled", [p.key for p in PROVIDERS])
+
+def resolve_provider(url: str):
+    for p in PROVIDERS:
+        if p.matches(url):
+            ext_id = p.extract_id(url)
+            if ext_id:
+                return p, ext_id
+    return None, None
+
+async def parse_media_url(url: str) -> dict:
+    url = (url or "").strip()
+    if not url or not re.match(r"^https?://", url):
+        raise HTTPException(400, "URL inválida. Informe um link http(s) completo.")
+    prov, ext_id = resolve_provider(url)
+    if not prov:
+        raise HTTPException(400, "Provedor não suportado. Use YouTube ou Vimeo (links oficiais).")
+    if prov.key not in await enabled_providers():
+        raise HTTPException(400, f"O provedor {prov.name} está desativado pelo Login Mestre.")
+    return {
+        "provider": prov.key, "provider_name": prov.name, "external_id": ext_id,
+        "embed_url": prov.embed_url(ext_id), "watch_url": prov.watch_url(ext_id),
+        "can_embed": prov.embeddable, "thumbnail": prov.thumbnail(ext_id),
+    }
+
+def media_public(doc: dict) -> dict:
+    doc = dict(doc)
+    doc.pop("_id", None)
+    return doc
+
+def media_accessible(user: dict, doc: dict) -> bool:
+    if user["role"] in ("mestre", "formador", "admin"):
+        return True
+    if doc.get("status") != "published":
+        return False
+    st = doc.get("stages") or []
+    return (not st) or (user["current_stage_order"] in st)
+
+class ExternalMediaIn(BaseModel):
+    url: str
+    title: str
+    description: str = ""
+    kind: str = "video"          # "video" | "live"
+    category: str = ""
+    thumbnail: str = ""
+    stages: List[int] = []
+    scheduled_at: str = ""
+    live_status: str = "scheduled"
+    chat_enabled: bool = False
+    publish: bool = True
+
+class ExternalMediaPatch(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    thumbnail: Optional[str] = None
+    stages: Optional[List[int]] = None
+    scheduled_at: Optional[str] = None
+    publish: Optional[bool] = None
+
+class LiveStatusIn(BaseModel):
+    live_status: str
+
+class ProvidersIn(BaseModel):
+    enabled: List[str]
+
+# --- provedores (config do Mestre) ---
+@api.get("/media/providers")
+async def get_media_providers(user: dict = Depends(get_current_user)):
+    enabled = await enabled_providers()
+    return {"providers": [{"key": p.key, "name": p.name, "embeddable": p.embeddable,
+                           "enabled": p.key in enabled} for p in PROVIDERS]}
+
+@api.put("/master/media/providers")
+async def set_media_providers(body: ProvidersIn, master: dict = Depends(require_master)):
+    enabled = [k for k in body.enabled if k in [p.key for p in PROVIDERS]]
+    await db.settings.update_one({"key": "media_providers"},
+                                 {"$set": {"key": "media_providers", "enabled": enabled}}, upsert=True)
+    await audit("set_media_providers", master, enabled=enabled)
+    return {"ok": True, "enabled": enabled}
+
+# --- validação/normalização de URL ---
+@api.post("/media/parse")
+async def media_parse(body: dict, user: dict = Depends(require_perm("MANAGE_EXTERNAL_MEDIA"))):
+    return await parse_media_url(body.get("url", ""))
+
+# --- CRUD mídia externa ---
+@api.post("/external-media")
+async def create_external_media(body: ExternalMediaIn, user: dict = Depends(require_perm("MANAGE_EXTERNAL_MEDIA"))):
+    info = await parse_media_url(body.url)
+    if body.kind == "live" and body.live_status not in LIVE_STATUSES:
+        raise HTTPException(400, "Status de live inválido.")
+    doc = {
+        "id": str(uuid.uuid4()), "title": body.title, "description": body.description,
+        "kind": body.kind, "category": body.category,
+        "source_url": body.url, "provider": info["provider"], "provider_name": info["provider_name"],
+        "external_id": info["external_id"], "embed_url": info["embed_url"], "watch_url": info["watch_url"],
+        "can_embed": info["can_embed"], "thumbnail": body.thumbnail or info["thumbnail"],
+        "stages": body.stages, "scheduled_at": body.scheduled_at,
+        "live_status": body.live_status if body.kind == "live" else None,
+        "chat_enabled": body.chat_enabled,
+        "status": "published" if body.publish else "draft",
+        "owner_id": user["id"], "owner_name": user["name"], "created_at": now_iso(),
+    }
+    await db.external_media.insert_one(doc)
+    await audit("create_external_media", user, media_id=doc["id"], provider=info["provider"])
+    return media_public(doc)
+
+@api.get("/external-media")
+async def list_external_media(kind: Optional[str] = None, q: Optional[str] = None,
+                              user: dict = Depends(get_current_user)):
+    query = {}
+    if kind in ("video", "live"):
+        query["kind"] = kind
+    items = await db.external_media.find(query).sort("created_at", -1).to_list(500)
+    out = []
+    for m in items:
+        if not media_accessible(user, m):
+            continue
+        if q and q.lower() not in (m.get("title", "") + " " + m.get("description", "") + " " + m.get("category", "")).lower():
+            continue
+        out.append(media_public(m))
+    return out
+
+@api.get("/external-media/favorites")
+async def media_favorites(user: dict = Depends(get_current_user)):
+    favs = await db.media_favorites.find({"user_id": user["id"]}).to_list(500)
+    ids = [f["media_id"] for f in favs]
+    items = await db.external_media.find({"id": {"$in": ids}}).to_list(500)
+    return [media_public(m) for m in items if media_accessible(user, m)]
+
+@api.get("/external-media/history")
+async def media_history(user: dict = Depends(get_current_user)):
+    hist = await db.media_history.find({"user_id": user["id"]}).sort("accessed_at", -1).to_list(50)
+    ids = [h["media_id"] for h in hist]
+    items = {m["id"]: m async for m in db.external_media.find({"id": {"$in": ids}})}
+    out = []
+    for h in hist:
+        m = items.get(h["media_id"])
+        if m and media_accessible(user, m):
+            d = media_public(m)
+            d["accessed_at"] = h["accessed_at"]
+            out.append(d)
+    return out
+
+@api.get("/external-media/{mid}")
+async def get_external_media(mid: str, user: dict = Depends(get_current_user)):
+    m = await db.external_media.find_one({"id": mid})
+    if not m:
+        raise HTTPException(404, "Mídia não encontrada")
+    if not media_accessible(user, m):
+        raise HTTPException(403, "Este conteúdo não está liberado para a sua etapa atual.")
+    fav = await db.media_favorites.find_one({"user_id": user["id"], "media_id": mid})
+    # registra "acessado" (progresso mínimo sem evento oficial do player)
+    await db.media_history.update_one(
+        {"user_id": user["id"], "media_id": mid},
+        {"$set": {"accessed_at": now_iso()}, "$setOnInsert": {"id": str(uuid.uuid4())}}, upsert=True)
+    d = media_public(m)
+    d["favorited"] = bool(fav)
+    return d
+
+@api.patch("/external-media/{mid}")
+async def edit_external_media(mid: str, body: ExternalMediaPatch, user: dict = Depends(require_perm("MANAGE_EXTERNAL_MEDIA"))):
+    m = await db.external_media.find_one({"id": mid})
+    if not m:
+        raise HTTPException(404, "Mídia não encontrada")
+    if not can_edit(user, m):
+        raise HTTPException(403, "Você só pode editar suas próprias mídias.")
+    updates = {k: v for k, v in body.model_dump().items() if v is not None and k != "publish"}
+    if body.publish is not None:
+        updates["status"] = "published" if body.publish else "draft"
+    if updates:
+        await db.external_media.update_one({"id": mid}, {"$set": updates})
+        await audit("edit_external_media", user, media_id=mid)
+    return {"ok": True}
+
+@api.delete("/external-media/{mid}")
+async def delete_external_media(mid: str, user: dict = Depends(require_perm("MANAGE_EXTERNAL_MEDIA"))):
+    m = await db.external_media.find_one({"id": mid})
+    if not m:
+        raise HTTPException(404, "Mídia não encontrada")
+    if not can_edit(user, m):
+        raise HTTPException(403, "Você só pode remover suas próprias mídias.")
+    await db.external_media.delete_one({"id": mid})
+    await audit("delete_external_media", user, media_id=mid)
+    return {"ok": True}
+
+@api.post("/external-media/{mid}/live-status")
+async def set_media_live_status(mid: str, body: LiveStatusIn, user: dict = Depends(require_perm("MANAGE_EXTERNAL_MEDIA"))):
+    m = await db.external_media.find_one({"id": mid})
+    if not m:
+        raise HTTPException(404, "Mídia não encontrada")
+    if m.get("kind") != "live":
+        raise HTTPException(400, "Esta mídia não é uma live externa.")
+    if not can_edit(user, m):
+        raise HTTPException(403, "Você não é responsável por esta live.")
+    if body.live_status not in LIVE_STATUSES:
+        raise HTTPException(400, "Status de live inválido.")
+    await db.external_media.update_one({"id": mid}, {"$set": {"live_status": body.live_status}})
+    await audit("set_media_live_status", user, media_id=mid, live_status=body.live_status)
+    if body.live_status == "live":
+        stages = m.get("stages") or []
+        q = {"role": "membro"} if not stages else {"role": "membro", "current_stage_order": {"$in": stages}}
+        async for mm in db.users.find(q):
+            await notify(mm["id"], "🔴 Live externa ao vivo", f"'{m['title']}' está ao vivo agora.")
+    return {"ok": True, "live_status": body.live_status}
+
+@api.post("/external-media/{mid}/favorite")
+async def toggle_media_favorite(mid: str, user: dict = Depends(get_current_user)):
+    m = await db.external_media.find_one({"id": mid})
+    if not m:
+        raise HTTPException(404, "Mídia não encontrada")
+    if not media_accessible(user, m):
+        raise HTTPException(403, "Conteúdo não liberado para a sua etapa.")
+    existing = await db.media_favorites.find_one({"user_id": user["id"], "media_id": mid})
+    if existing:
+        await db.media_favorites.delete_one({"user_id": user["id"], "media_id": mid})
+        return {"ok": True, "favorited": False}
+    if not media_accessible(user, m):
+        raise HTTPException(403, "Conteúdo não liberado para a sua etapa.")
+    await db.media_favorites.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "media_id": mid, "at": now_iso()})
+    return {"ok": True, "favorited": True}
+
+
 # ---------------- seed ----------------
 STAGES = [
     {"order": 1, "slug": "PRE_VOCACIONADO", "name": "Pré-Vocacionado", "theme": "Descobrir", "icon": "sprout",
@@ -1201,6 +1514,35 @@ async def seed():
             await db.events.insert_one({"id": str(uuid.uuid4()), "title": t, "kind": kind,
                                         "date": (base + timedelta(days=d)).isoformat(),
                                         "location": "Sede da Comunidade"})
+
+    # demo external media (embed oficial — apenas URLs públicas)
+    if await db.external_media.count_documents({}) == 0:
+        owner = await db.users.find_one({"email": "formador@caminho.app"})
+        oid = owner["id"] if owner else "system"
+        oname = owner["name"] if owner else "Comunidade CAMINHO"
+        demo_media = [
+            {"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "title": "Louvor e Adoração", "description": "Momento de música e oração para todos.", "kind": "video", "category": "Oração", "stages": []},
+            {"url": "https://youtu.be/hFZFjoX2cGg", "title": "Catequese: O Kerigma", "description": "Formação doutrinal para a etapa Pré-Vocacionado.", "kind": "video", "category": "Formação", "stages": [1]},
+            {"url": "https://www.youtube.com/live/5qap5aO4i9A", "title": "Live: Adoração ao Santíssimo", "description": "Transmissão ao vivo hospedada no YouTube.", "kind": "live", "category": "Comunidade", "stages": [], "live_status": "scheduled"},
+            {"url": "https://vimeo.com/76979871", "title": "Testemunho de Vocação", "description": "Vídeo hospedado no Vimeo (etapa Discípulo Ano 1).", "kind": "video", "category": "Vocação", "stages": [3]},
+        ]
+        for dm in demo_media:
+            try:
+                info = await parse_media_url(dm["url"])
+            except Exception:
+                continue
+            await db.external_media.insert_one({
+                "id": str(uuid.uuid4()), "title": dm["title"], "description": dm["description"],
+                "kind": dm["kind"], "category": dm["category"], "source_url": dm["url"],
+                "provider": info["provider"], "provider_name": info["provider_name"],
+                "external_id": info["external_id"], "embed_url": info["embed_url"],
+                "watch_url": info["watch_url"], "can_embed": info["can_embed"],
+                "thumbnail": info["thumbnail"], "stages": dm["stages"], "scheduled_at": "",
+                "live_status": dm.get("live_status") if dm["kind"] == "live" else None,
+                "chat_enabled": False, "status": "published",
+                "owner_id": oid, "owner_name": oname, "created_at": now_iso(),
+            })
+
 
     # lives
     if await db.lives.count_documents({}) == 0:
@@ -1294,10 +1636,12 @@ async def seed():
     demo_former_perms = ["CREATE_COURSE", "EDIT_COURSE", "CREATE_MODULE", "CREATE_LESSON", "EDIT_LESSON",
                          "PUBLISH_LESSON", "UPLOAD_VIDEO", "UPLOAD_AUDIO", "UPLOAD_DOCUMENT",
                          "CREATE_ANNOUNCEMENT", "DELETE_ANNOUNCEMENT", "CREATE_LIVE", "EDIT_LIVE",
-                         "START_LIVE", "END_LIVE", "MODERATE_LIVE", "VIEW_ANALYTICS"]
+                         "START_LIVE", "END_LIVE", "MODERATE_LIVE", "VIEW_ANALYTICS", "MANAGE_EXTERNAL_MEDIA"]
     fdoc = await db.users.find_one({"email": "formador@caminho.app"})
     if fdoc and not fdoc.get("permissions"):
         await db.users.update_one({"id": fdoc["id"]}, {"$set": {"permissions": demo_former_perms}})
+    elif fdoc and "MANAGE_EXTERNAL_MEDIA" not in (fdoc.get("permissions") or []):
+        await db.users.update_one({"id": fdoc["id"]}, {"$addToSet": {"permissions": "MANAGE_EXTERNAL_MEDIA"}})
 
     # demo formador
     former = await db.users.find_one({"email": "formador@caminho.app"})

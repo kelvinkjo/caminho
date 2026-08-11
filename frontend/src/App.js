@@ -25,6 +25,9 @@ import PastoralReport from "@/pages/PastoralReport";
 import StageRequirements from "@/pages/StageRequirements";
 import MasterPermissions from "@/pages/MasterPermissions";
 import FormerPanel from "@/pages/FormerPanel";
+import MediaCenter from "@/pages/MediaCenter";
+import MediaWatch from "@/pages/MediaWatch";
+import MediaManage from "@/pages/MediaManage";
 
 function Splash() {
   return <div className="min-h-screen bg-stone-950 flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-orange-600" /></div>;
@@ -65,6 +68,9 @@ function App() {
           <Route path="/app/defesa" element={<Protected><Apologetics /></Protected>} />
           <Route path="/app/busca" element={<Protected><Search /></Protected>} />
           <Route path="/app/lives" element={<Protected><Lives /></Protected>} />
+          <Route path="/app/midia" element={<Protected><MediaCenter /></Protected>} />
+          <Route path="/app/midia/gerenciar" element={<Protected roles={["formador", "mestre"]}><MediaManage /></Protected>} />
+          <Route path="/app/midia/:id" element={<Protected><MediaWatch /></Protected>} />
           <Route path="/app/pessoas" element={<Protected roles={["formador", "admin", "mestre"]}><MyPeople /></Protected>} />
           <Route path="/app/perfil" element={<Protected><Profile /></Protected>} />
           <Route path="/app/mestre" element={<Protected roles={["mestre"]}><MasterControl /></Protected>} />
