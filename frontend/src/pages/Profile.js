@@ -3,7 +3,8 @@ import { useAuth } from "../context/AuthContext";
 import { Shell } from "../components/Shell";
 import { LogOut, Users, ShieldCheck, Flame, ChevronRight, Sparkles, Search, ShieldQuestion, Crown, Award, BookMarked, Clapperboard, Radio } from "lucide-react";
 
-const roleLabel = { mestre: "Login Mestre", admin: "Administrador", formador: "Formador", moderador: "Moderador", membro: "Membro" };
+const roleLabel = { mestre: "Login Mestre", admin: "Admin Técnico", fundador: "Fundador", cofundador: "Cofundador", formador_geral: "Formador Geral", formador: "Formador", moderador: "Moderador", membro: "Membro" };
+const INSTITUTIONAL = ["fundador", "admin", "cofundador", "mestre"];
 
 export default function Profile() {
   const { user, logout } = useAuth();
@@ -50,25 +51,25 @@ export default function Profile() {
             <ShieldQuestion className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Defesa da Fé</span><ChevronRight className="text-stone-500" />
           </button>
 
-          {(user.role === "formador" || user.role === "mestre") && (
+          {(["formador", "formador_geral"].includes(user.role) || INSTITUTIONAL.includes(user.role)) && (
             <button data-testid="profile-formador-panel" onClick={() => nav("/app/formador")} className="w-full flex items-center gap-3 rounded-xl border border-orange-600/40 bg-orange-600/10 p-4 active:scale-[0.99] transition-transform">
               <BookMarked className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Central do Formador</span><ChevronRight className="text-stone-500" />
             </button>
           )}
 
-          {(user.role === "formador" || user.role === "admin" || user.role === "mestre") && (
+          {(["formador", "formador_geral"].includes(user.role) || INSTITUTIONAL.includes(user.role)) && (
             <button data-testid="profile-people" onClick={() => nav("/app/pessoas")} className="w-full flex items-center gap-3 rounded-xl border border-stone-800 bg-stone-900 p-4 active:scale-[0.99] transition-transform">
               <Users className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Minhas Pessoas</span><ChevronRight className="text-stone-500" />
             </button>
           )}
 
-          {user.role === "mestre" && (
+          {INSTITUTIONAL.includes(user.role) && (
             <button data-testid="profile-mestre" onClick={() => nav("/app/mestre")} className="w-full flex items-center gap-3 rounded-xl border border-orange-600/40 bg-orange-600/10 p-4 active:scale-[0.99] transition-transform">
-              <Crown className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Controle Mestre</span><ChevronRight className="text-stone-500" />
+              <Crown className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Controle de Etapas</span><ChevronRight className="text-stone-500" />
             </button>
           )}
 
-          {(user.role === "admin" || user.role === "mestre") && (
+          {INSTITUTIONAL.includes(user.role) && (
             <button data-testid="profile-admin" onClick={() => nav("/app/admin")} className="w-full flex items-center gap-3 rounded-xl border border-stone-800 bg-stone-900 p-4 active:scale-[0.99] transition-transform">
               <ShieldCheck className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Administração</span><ChevronRight className="text-stone-500" />
             </button>

@@ -96,6 +96,32 @@ function LiveBadge({ nav }) {
   );
 }
 
+function MyStatusCard() {
+  const [ctx, setCtx] = useState(null);
+  useEffect(() => { api.get("/me/context").then((r) => setCtx(r.data)).catch(() => {}); }, []);
+  if (!ctx) return null;
+  const STAGE_PT = { PRE_VOCACIONADO: "Pré-Vocacionado", VOCACIONADO: "Vocacionado", DISCIPULO: "Discípulo", COMPROMISSADO: "Compromissado", CONSAGRADO: "Consagrado" };
+  const STATUS_PT = { ATIVO: "Ativo", EM_FORMACAO: "Em formação", PAUSADO: "Pausado", AFASTADO: "Afastado", CONCLUIDO: "Concluído" };
+  const etapa = (STAGE_PT[ctx.formation_stage] || ctx.formation_stage) + (ctx.formation_year ? ` · Ano ${ctx.formation_year}` : "");
+  return (
+    <div data-testid="my-status-card" className="grid grid-cols-3 gap-2">
+      <div className="rounded-2xl border border-stone-800 bg-stone-900 p-3">
+        <p className="text-[10px] text-stone-500 uppercase tracking-wide">Minha função</p>
+        <p className="font-heading font-bold text-sm mt-0.5" data-testid="status-role">{ctx.role_label}</p>
+        {ctx.general_formador_name && <p className="text-[10px] text-stone-500 mt-0.5 truncate">↳ {ctx.general_formador_name}</p>}
+      </div>
+      <div className="rounded-2xl border border-orange-600/30 bg-orange-600/10 p-3">
+        <p className="text-[10px] text-orange-400/80 uppercase tracking-wide">Minha etapa</p>
+        <p className="font-heading font-bold text-sm mt-0.5 text-orange-300" data-testid="status-stage">{etapa}</p>
+      </div>
+      <div className="rounded-2xl border border-stone-800 bg-stone-900 p-3">
+        <p className="text-[10px] text-stone-500 uppercase tracking-wide">Status</p>
+        <p className="font-heading font-bold text-sm mt-0.5" data-testid="status-status">{STATUS_PT[ctx.formation_status] || ctx.formation_status}</p>
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [d, setD] = useState(null);
   const nav = useNavigate();
@@ -131,6 +157,9 @@ export default function Dashboard() {
 
         {/* Ao vivo agora */}
         <LiveBadge nav={nav} />
+
+        {/* Minha função × etapa × status (função ≠ etapa) */}
+        <MyStatusCard />
 
         {/* Notificações não lidas */}
         {d.notifications?.length > 0 && (

@@ -72,21 +72,21 @@ function App() {
           <Route path="/app/busca" element={<Protected><Search /></Protected>} />
           <Route path="/app/lives" element={<Protected><Lives /></Protected>} />
           <Route path="/app/midia" element={<Protected><MediaCenter /></Protected>} />
-          <Route path="/app/midia/gerenciar" element={<Protected roles={["formador", "mestre"]}><MediaManage /></Protected>} />
+          <Route path="/app/midia/gerenciar" element={<Protected roles={["formador", "formador_geral", "cofundador", "fundador", "admin", "mestre"]}><MediaManage /></Protected>} />
           <Route path="/app/midia/:id" element={<Protected><MediaWatch /></Protected>} />
           <Route path="/app/transmissoes" element={<Protected><BroadcastCenter /></Protected>} />
-          <Route path="/app/estudio/:id" element={<Protected roles={["formador", "mestre"]}><Studio /></Protected>} />
+          <Route path="/app/estudio/:id" element={<Protected roles={["formador", "formador_geral", "cofundador", "fundador", "admin", "mestre"]}><Studio /></Protected>} />
           <Route path="/app/ao-vivo/:id" element={<Protected><BroadcastViewer /></Protected>} />
-          <Route path="/app/pessoas" element={<Protected roles={["formador", "admin", "mestre"]}><MyPeople /></Protected>} />
+          <Route path="/app/pessoas" element={<Protected roles={["formador", "formador_geral", "cofundador", "admin", "fundador", "mestre"]}><MyPeople /></Protected>} />
           <Route path="/app/perfil" element={<Protected><Profile /></Protected>} />
-          <Route path="/app/mestre" element={<Protected roles={["mestre"]}><MasterControl /></Protected>} />
-          <Route path="/app/mestre/relatorio" element={<Protected roles={["mestre"]}><PastoralReport /></Protected>} />
-          <Route path="/app/mestre/requisitos" element={<Protected roles={["mestre"]}><StageRequirements /></Protected>} />
-          <Route path="/app/mestre/permissoes" element={<Protected roles={["mestre"]}><MasterPermissions /></Protected>} />
-          <Route path="/app/formador" element={<Protected roles={["formador", "mestre"]}><FormerPanel /></Protected>} />
+          <Route path="/app/mestre" element={<Protected roles={["mestre", "fundador", "admin", "cofundador"]}><MasterControl /></Protected>} />
+          <Route path="/app/mestre/relatorio" element={<Protected roles={["mestre", "fundador", "admin", "cofundador"]}><PastoralReport /></Protected>} />
+          <Route path="/app/mestre/requisitos" element={<Protected roles={["mestre", "fundador", "admin", "cofundador"]}><StageRequirements /></Protected>} />
+          <Route path="/app/mestre/permissoes" element={<Protected roles={["mestre", "fundador", "admin", "cofundador"]}><MasterPermissions /></Protected>} />
+          <Route path="/app/formador" element={<Protected roles={["formador", "formador_geral", "cofundador", "fundador", "admin", "mestre"]}><FormerPanel /></Protected>} />
           <Route path="/app/passaporte" element={<Protected><Passport /></Protected>} />
           <Route path="/app/notificacoes" element={<Protected><Notifications /></Protected>} />
-          <Route path="/app/admin" element={<Protected roles={["admin", "mestre"]}><Admin /></Protected>} />
+          <Route path="/app/admin" element={<Protected roles={["admin", "fundador", "cofundador", "mestre"]}><Admin /></Protected>} />
           <Route path="*" element={<Navigate to="/app" replace />} />
         </Routes>
       </BrowserRouter>

@@ -50,6 +50,13 @@ def public_user(u: dict) -> dict:
     u = dict(u)
     u.pop("_id", None)
     u.pop("password_hash", None)
+    u["permissions"] = sorted(effective_perms(u))
+    u["role_label"] = ROLE_LABEL.get(u.get("role"), u.get("role"))
+    u["is_top_authority"] = u.get("role") in TOP_AUTHORITY
+    _fst, _fyr = FORMATION_META.get(u.get("current_stage_order", 1), ("PRE_VOCACIONADO", None))
+    u.setdefault("formation_stage", _fst)
+    u.setdefault("formation_year", _fyr)
+    u.setdefault("formation_status", "EM_FORMACAO" if u.get("role") == "membro" else "ATIVO")
     return u
 
 async def get_current_user(request: Request) -> dict:
@@ -76,16 +83,16 @@ async def get_current_user(request: Request) -> dict:
 
 def require_roles(*roles):
     async def dep(user: dict = Depends(get_current_user)):
-        if user["role"] != "mestre" and user["role"] not in roles:
+        if user["role"] != "mestre" and not is_top_authority(user) and user["role"] not in roles:
             raise HTTPException(403, "Acesso não autorizado")
         return user
     return dep
 
 async def require_master(user: dict = Depends(get_current_user)) -> dict:
-    # Permissão MANAGE_FORMATION_STAGE — exclusiva do Login Mestre
-    if user["role"] != "mestre":
-        raise HTTPException(403, "Apenas o Login Mestre pode gerenciar etapas de formação.")
-    return user
+    # Autoridade institucional sobre etapas/config: Admin, Fundador (ou quem tiver MANAGE_FORMATION_STAGE)
+    if user["role"] in ("admin", "fundador") or "MANAGE_FORMATION_STAGE" in (user.get("permissions") or []):
+        return user
+    raise HTTPException(403, "Apenas Admin ou Fundador podem gerenciar etapas e configurações de formação.")
 
 # ---------------- models ----------------
 class RegisterIn(BaseModel):
@@ -197,7 +204,7 @@ async def get_stages(user: dict = Depends(get_current_user)):
 
 @api.get("/stages/{order}/modules")
 async def get_modules(order: int, user: dict = Depends(get_current_user)):
-    if user["role"] not in ("admin", "formador", "mestre") and order > user["current_stage_order"]:
+    if user["role"] in STAFF_ROLES and order > user["current_stage_order"]:
         raise HTTPException(403, "Etapa bloqueada")
     modules = await db.modules.find({"stage_order": order}).sort("order", 1).to_list(200)
     prog_docs = await db.lesson_progress.find({"user_id": user["id"]}).to_list(2000)
@@ -323,7 +330,7 @@ def radar_status(last_active: str):
 
 @api.get("/formador/people")
 async def my_people(user: dict = Depends(require_roles("admin", "formador"))):
-    q = {} if user["role"] in ("admin", "mestre") else {"formador_id": user["id"]}
+    q = {} if user["role"] in ("admin", "fundador", "cofundador") else {"formador_id": user["id"]}
     q["role"] = "membro"
     people = await db.users.find(q).to_list(1000)
     stages = {s["order"]: s async for s in db.stages.find()}
@@ -522,7 +529,8 @@ async def _apply_stage(uid: str, new_order: int, reason: str, action: str, maste
             raise HTTPException(400, "Etapa inválida.")
         change_type = "MAINTAIN_STAGE" if new_order == prev else ("ADVANCEMENT" if new_order > prev else "RETROCESSION")
         if new_order != prev:
-            await db.users.update_one({"id": uid}, {"$set": {"current_stage_order": new_order}})
+            _fst, _fyr = FORMATION_META.get(new_order, ("PRE_VOCACIONADO", None))
+            await db.users.update_one({"id": uid}, {"$set": {"current_stage_order": new_order, "formation_stage": _fst, "formation_year": _fyr}})
     log = {"id": str(uuid.uuid4()), "user_id": uid, "previous_stage": prev, "new_stage": new_order,
            "changed_by": master["id"], "changed_by_name": master["name"], "changed_at": now_iso(),
            "reason": reason.strip(), "change_type": change_type, "ip": ip}
@@ -537,7 +545,8 @@ async def _apply_stage(uid: str, new_order: int, reason: str, action: str, maste
     else:
         await notify(uid, "Sua jornada foi atualizada", f"Sua etapa de formação foi atualizada para {stages.get(new_order,'')}. Continue sua caminhada de formação, comunidade e missão.")
     if u.get("formador_id"):
-        await notify(u["formador_id"], "Decisão de etapa registrada", f"A decisão sobre a etapa de {u['name']} foi registrada pelo Login Mestre.")
+        await notify(u["formador_id"], "Decisão de etapa registrada", f"A decisão sobre a etapa de {u['name']} foi registrada pela liderança.")
+    await audit("FORMATION_STAGE_CHANGED", master, user_id=uid, previous=prev, new=new_order, change_type=change_type)
     log.pop("_id", None)
     return log
 
@@ -656,7 +665,7 @@ class PresenceIn(BaseModel):
     percent: int = 0
 
 def live_accessible(live: dict, user: dict) -> bool:
-    if user["role"] in ("admin", "formador", "mestre"):
+    if user["role"] in STAFF_ROLES:
         return True
     stages = live.get("stages")
     if stages:
@@ -756,7 +765,7 @@ async def search(q: str, user: dict = Depends(get_current_user)):
     if len(q) < 2:
         raise HTTPException(400, "Digite ao menos 2 caracteres.")
     rx = {"$regex": q, "$options": "i"}
-    max_order = 6 if user["role"] in ("admin", "formador", "mestre") else user["current_stage_order"]
+    max_order = 6 if user["role"] in STAFF_ROLES else user["current_stage_order"]
     lessons = await db.lessons.find({"stage_order": {"$lte": max_order}, "$or": [{"title": rx}, {"content": rx}, {"dimension": rx}]}).to_list(15)
     apol = await db.apologetics.find({"$or": [{"question": rx}, {"answer": rx}, {"category": rx}]}).to_list(15)
     answer = ""
@@ -862,12 +871,56 @@ ALL_PERMISSIONS = [
     "VIEW_ANALYTICS", "MANAGE_CONTENT_ACCESS", "EDIT_ALL_CONTENT", "MANAGE_EXTERNAL_MEDIA",
     "MANAGE_LIVE", "MANAGE_CAMERA", "MANAGE_MICROPHONE", "MANAGE_SCENES", "MANAGE_SOURCES",
     "VIEW_LIVE_ANALYTICS", "TAKE_OVER_LIVE",
+    # Fase 1 — gestão institucional / RBAC
+    "MANAGE_USERS", "CREATE_USERS", "EDIT_USERS", "DELETE_USERS",
+    "MANAGE_FOUNDERS", "MANAGE_COFOUNDERS", "MANAGE_FORMADOR_GERAL", "MANAGE_FORMADORES",
+    "MANAGE_MEMBERS", "MANAGE_FORMATION", "MANAGE_FORMATION_STAGES", "MANAGE_FORMATION_STAGE",
+    "CHANGE_FORMATION_STAGE", "TRANSFER_FORMADOR",
+    "VIEW_AUDIT_LOG", "MANAGE_PERMISSIONS", "MANAGE_SETTINGS",
 ]
 
+# --- Hierarquia institucional (role) — INDEPENDENTE da etapa de formação ---
+ROLES = ["admin", "fundador", "cofundador", "formador_geral", "formador", "membro"]
+ROLE_RANK = {"admin": 6, "fundador": 5, "cofundador": 4, "formador_geral": 3, "formador": 2, "membro": 1}
+ROLE_LABEL = {"admin": "Admin Técnico", "fundador": "Fundador", "cofundador": "Cofundador",
+              "formador_geral": "Formador Geral", "formador": "Formador", "membro": "Membro"}
+TOP_AUTHORITY = ("admin", "fundador")
+STAFF_ROLES = ("admin", "fundador", "cofundador", "formador_geral", "formador")
+ADMIN_PROTECTED_MSG = "O administrador técnico possui proteção estrutural e não pode ser alterado por este perfil."
+
+# etapa (order) -> (formation_stage, formation_year)
+FORMATION_META = {1: ("PRE_VOCACIONADO", None), 2: ("VOCACIONADO", None), 3: ("DISCIPULO", 1),
+                  4: ("DISCIPULO", 2), 5: ("COMPROMISSADO", None), 6: ("CONSAGRADO", None)}
+FORMATION_STATUSES = ["ATIVO", "EM_FORMACAO", "PAUSADO", "AFASTADO", "CONCLUIDO"]
+
+CONTENT_PERMS = ["CREATE_COURSE", "EDIT_COURSE", "CREATE_MODULE", "CREATE_LESSON", "EDIT_LESSON",
+                 "PUBLISH_LESSON", "PUBLISH_COURSE", "UPLOAD_VIDEO", "UPLOAD_AUDIO", "UPLOAD_DOCUMENT",
+                 "CREATE_ANNOUNCEMENT", "DELETE_ANNOUNCEMENT", "MANAGE_EXTERNAL_MEDIA"]
+LIVE_PERMS = ["CREATE_LIVE", "EDIT_LIVE", "START_LIVE", "END_LIVE", "MODERATE_LIVE", "MANAGE_LIVE",
+              "MANAGE_CAMERA", "MANAGE_MICROPHONE", "MANAGE_SCENES", "MANAGE_SOURCES", "VIEW_LIVE_ANALYTICS"]
+
+ROLE_DEFAULT_PERMS = {
+    "cofundador": ["MANAGE_USERS", "CREATE_USERS", "EDIT_USERS", "MANAGE_FORMADOR_GERAL", "MANAGE_FORMADORES",
+                   "MANAGE_MEMBERS", "MANAGE_FORMATION", "MANAGE_FORMATION_STAGES", "VIEW_ANALYTICS",
+                   "VIEW_AUDIT_LOG", "MANAGE_PERMISSIONS", "TRANSFER_FORMADOR", "EDIT_ALL_CONTENT"] + CONTENT_PERMS + LIVE_PERMS,
+    "formador_geral": ["MANAGE_FORMADORES", "TRANSFER_FORMADOR", "MANAGE_FORMATION", "CHANGE_FORMATION_STAGE",
+                       "VIEW_ANALYTICS", "EDIT_ALL_CONTENT"] + CONTENT_PERMS + LIVE_PERMS,
+    "formador": CONTENT_PERMS + LIVE_PERMS + ["VIEW_ANALYTICS"],
+    "membro": [],
+}
+
+def role_rank(r): return ROLE_RANK.get(r, 0)
+def is_top_authority(u): return u.get("role") in TOP_AUTHORITY
+def is_admin_protected(u): return u.get("role") == "admin" or u.get("admin_protected") is True
+
+def effective_perms(user: dict):
+    if user.get("role") in TOP_AUTHORITY:
+        return set(ALL_PERMISSIONS)
+    base = set(ROLE_DEFAULT_PERMS.get(user.get("role"), []))
+    return base | set(user.get("permissions") or [])
+
 def has_perm(user: dict, perm: str) -> bool:
-    if user["role"] == "mestre":
-        return True
-    return perm in (user.get("permissions") or [])
+    return perm in effective_perms(user)
 
 def require_perm(perm: str):
     async def dep(user: dict = Depends(get_current_user)):
@@ -877,7 +930,16 @@ def require_perm(perm: str):
     return dep
 
 def can_edit(user: dict, doc: dict) -> bool:
-    return user["role"] == "mestre" or doc.get("owner_id") == user["id"] or has_perm(user, "EDIT_ALL_CONTENT")
+    return is_top_authority(user) or doc.get("owner_id") == user["id"] or has_perm(user, "EDIT_ALL_CONTENT")
+
+def can_manage_target(actor: dict, target: dict) -> bool:
+    if is_admin_protected(target) and actor.get("role") != "admin":
+        return False
+    if actor.get("role") == "admin":
+        return True
+    if actor["id"] == target["id"]:
+        return False
+    return role_rank(target.get("role")) < role_rank(actor.get("role"))
 
 async def audit(action: str, user: dict, **extra):
     await db.audit_logs.insert_one({"id": str(uuid.uuid4()), "action": action, "by": user["id"],
@@ -954,10 +1016,190 @@ async def set_formador_permissions(fid: str, body: PermsIn, master: dict = Depen
     f = await db.users.find_one({"id": fid})
     if not f or f["role"] != "formador":
         raise HTTPException(404, "Formador não encontrado")
-    perms = [p for p in body.permissions if p in ALL_PERMISSIONS]  # etapas NUNCA são concedidas aqui
+    # nunca conceder permissão que o próprio ator não possui; etapas NUNCA são concedidas aqui
+    perms = [p for p in body.permissions if p in ALL_PERMISSIONS and p != "MANAGE_FORMATION_STAGE" and has_perm(master, p)]
     await db.users.update_one({"id": fid}, {"$set": {"permissions": perms}})
     await audit("set_permissions", master, target=fid, permissions=perms)
     return {"ok": True, "permissions": perms}
+
+# ================= HIERARQUIA INSTITUCIONAL / RBAC (Fase 1) =================
+class RoleChangeIn(BaseModel):
+    role: str
+    reason: str = ""
+
+class FormationChangeIn(BaseModel):
+    new_stage_order: Optional[int] = None
+    formation_status: Optional[str] = None
+    reason: str
+
+class AssignGeralIn(BaseModel):
+    general_formador_id: str
+    reason: str = ""
+
+class ResolveReqIn2(BaseModel):
+    approve: bool
+    reason: str = ""
+
+async def _load_user(uid: str):
+    u = await db.users.find_one({"id": uid})
+    if not u:
+        raise HTTPException(404, "Usuário não encontrado")
+    return u
+
+@api.get("/me/context")
+async def my_context(user: dict = Depends(get_current_user)):
+    gname = None
+    if user.get("general_formador_id"):
+        g = await db.users.find_one({"id": user["general_formador_id"]})
+        gname = g["name"] if g else None
+    fst, fyr = FORMATION_META.get(user.get("current_stage_order", 1), ("PRE_VOCACIONADO", None))
+    return {"role": user["role"], "role_label": ROLE_LABEL.get(user["role"], user["role"]),
+            "formation_stage": user.get("formation_stage", fst), "formation_year": user.get("formation_year", fyr),
+            "formation_status": user.get("formation_status", "EM_FORMACAO"),
+            "general_formador_name": gname, "permissions": sorted(effective_perms(user))}
+
+@api.get("/admin/users")
+async def admin_list_users(role: Optional[str] = None, search: Optional[str] = None,
+                           actor: dict = Depends(require_perm("MANAGE_USERS"))):
+    q = {}
+    if role:
+        q["role"] = role
+    if search:
+        rx = {"$regex": search, "$options": "i"}
+        q["$or"] = [{"name": rx}, {"email": rx}]
+    users = await db.users.find(q).sort("name", 1).to_list(2000)
+    return [{"id": u["id"], "name": u["name"], "email": u["email"], "role": u["role"],
+             "role_label": ROLE_LABEL.get(u["role"], u["role"]),
+             "current_stage_order": u.get("current_stage_order"), "formation_stage": u.get("formation_stage"),
+             "formation_year": u.get("formation_year"), "formation_status": u.get("formation_status"),
+             "admin_protected": is_admin_protected(u), "blocked": u.get("blocked", False),
+             "general_formador_id": u.get("general_formador_id"), "formador_id": u.get("formador_id"),
+             "manageable": can_manage_target(actor, u)} for u in users]
+
+@api.patch("/admin/users/{uid}/role")
+async def change_user_role(uid: str, body: RoleChangeIn, actor: dict = Depends(require_perm("MANAGE_USERS"))):
+    target = await _load_user(uid)
+    if body.role not in ROLES:
+        raise HTTPException(400, "Função inválida.")
+    if is_admin_protected(target) and actor["role"] != "admin":
+        raise HTTPException(403, ADMIN_PROTECTED_MSG)
+    if actor["id"] == uid:
+        raise HTTPException(403, "Você não pode alterar a própria função.")
+    if not can_manage_target(actor, target):
+        raise HTTPException(403, "Você não pode gerenciar este usuário.")
+    if body.role == "admin" and actor["role"] != "admin":
+        raise HTTPException(403, ADMIN_PROTECTED_MSG)
+    if actor["role"] != "admin" and role_rank(body.role) >= role_rank(actor["role"]):
+        raise HTTPException(403, "Você não pode atribuir uma função igual ou superior à sua.")
+    await db.users.update_one({"id": uid}, {"$set": {"role": body.role}})
+    await audit("ROLE_CHANGED", actor, user_id=uid, previous=target["role"], new=body.role, reason=body.reason)
+    return {"ok": True, "role": body.role}
+
+@api.put("/admin/users/{uid}/permissions")
+async def set_user_permissions(uid: str, body: PermsIn, actor: dict = Depends(require_perm("MANAGE_PERMISSIONS"))):
+    target = await _load_user(uid)
+    if is_admin_protected(target) and actor["role"] != "admin":
+        raise HTTPException(403, ADMIN_PROTECTED_MSG)
+    if not can_manage_target(actor, target):
+        raise HTTPException(403, "Você não pode gerenciar este usuário.")
+    perms = [p for p in body.permissions if p in ALL_PERMISSIONS and p != "MANAGE_FORMATION_STAGE" and has_perm(actor, p)]
+    await db.users.update_one({"id": uid}, {"$set": {"permissions": perms}})
+    await audit("PERMISSIONS_CHANGED", actor, user_id=uid, permissions=perms)
+    return {"ok": True, "permissions": perms}
+
+@api.post("/admin/formadores/{fid}/assign-geral")
+async def assign_formador_geral(fid: str, body: AssignGeralIn, actor: dict = Depends(require_perm("MANAGE_FORMADORES"))):
+    f = await _load_user(fid)
+    if f["role"] != "formador":
+        raise HTTPException(400, "O usuário não é um Formador.")
+    g = await _load_user(body.general_formador_id)
+    if g["role"] != "formador_geral":
+        raise HTTPException(400, "O destino não é um Formador Geral.")
+    prev = f.get("general_formador_id")
+    await db.users.update_one({"id": fid}, {"$set": {"general_formador_id": body.general_formador_id}})
+    await db.formador_relationships.insert_one({"id": str(uuid.uuid4()), "formador_id": fid,
+        "formador_geral_id": body.general_formador_id, "previous_geral_id": prev,
+        "assigned_by": actor["id"], "assigned_at": now_iso(), "status": "active", "reason": body.reason})
+    await audit("TRANSFER_FORMADOR", actor, formador_id=fid, previous=prev, new=body.general_formador_id)
+    return {"ok": True}
+
+@api.patch("/admin/users/{uid}/formation")
+async def change_user_formation(uid: str, body: FormationChangeIn, request: Request, actor: dict = Depends(get_current_user)):
+    if not body.reason.strip():
+        raise HTTPException(400, "O motivo é obrigatório.")
+    if actor["id"] == uid:
+        raise HTTPException(403, "Você não pode alterar a própria etapa de formação.")
+    target = await _load_user(uid)
+    settings = await db.settings.find_one({"key": "app"}) or {}
+    requires_approval = settings.get("stage_change_requires_approval", True)
+    cofound_can = settings.get("cofundador_can_change_stage", False)
+    role = actor["role"]
+    direct = False
+    if role in ("admin", "fundador"):
+        direct = True
+    elif role == "cofundador" and cofound_can and has_perm(actor, "CHANGE_FORMATION_STAGE"):
+        direct = True
+    elif role == "formador_geral" and has_perm(actor, "CHANGE_FORMATION_STAGE"):
+        resp = False
+        if target.get("role") == "formador":
+            resp = target.get("general_formador_id") == actor["id"]
+        elif target.get("role") == "membro" and target.get("formador_id"):
+            fm = await db.users.find_one({"id": target["formador_id"]})
+            resp = bool(fm and fm.get("general_formador_id") == actor["id"])
+        if not resp:
+            raise HTTPException(403, "Este usuário não está sob a sua responsabilidade.")
+        direct = not requires_approval
+    else:
+        raise HTTPException(403, "Você não tem autoridade para alterar etapas de formação.")
+    if body.formation_status:
+        if body.formation_status not in FORMATION_STATUSES:
+            raise HTTPException(400, "Status inválido.")
+        await db.users.update_one({"id": uid}, {"$set": {"formation_status": body.formation_status}})
+        await audit("FORMATION_STATUS_CHANGED", actor, user_id=uid, status=body.formation_status)
+    if body.new_stage_order is None:
+        return {"ok": True, "status": "status_updated" if body.formation_status else "noop"}
+    if not (1 <= body.new_stage_order <= 6):
+        raise HTTPException(400, "Etapa inválida.")
+    if not direct:
+        req = {"id": str(uuid.uuid4()), "user_id": uid, "user_name": target["name"],
+               "from_order": target["current_stage_order"], "to_order": body.new_stage_order,
+               "requested_by": actor["id"], "requested_by_name": actor["name"], "reason": body.reason.strip(),
+               "status": "pending", "created_at": now_iso()}
+        await db.stage_change_requests.insert_one(req)
+        await audit("FORMATION_STAGE_CHANGE_REQUESTED", actor, user_id=uid, to_order=body.new_stage_order)
+        async for a in db.users.find({"role": {"$in": ["admin", "fundador"]}}):
+            await notify(a["id"], "Solicitação de mudança de etapa", f"{actor['name']} solicitou mudança de etapa para {target['name']}.")
+        req.pop("_id", None)
+        return {"ok": True, "status": "requested", "request": req}
+    ip = request.client.host if request.client else None
+    log = await _apply_stage(uid, body.new_stage_order, body.reason, "change", actor, ip)
+    return {"ok": True, "status": "applied", "log": log}
+
+@api.get("/formation/stage-requests")
+async def list_stage_requests(actor: dict = Depends(require_master)):
+    reqs = await db.stage_change_requests.find({"status": "pending"}).sort("created_at", -1).to_list(200)
+    for r in reqs:
+        r.pop("_id", None)
+    return reqs
+
+@api.post("/formation/stage-requests/{rid}/resolve")
+async def resolve_stage_request(rid: str, body: ResolveReqIn2, request: Request, actor: dict = Depends(require_master)):
+    r = await db.stage_change_requests.find_one({"id": rid})
+    if not r:
+        raise HTTPException(404, "Solicitação não encontrada")
+    if r["status"] != "pending":
+        raise HTTPException(400, "Solicitação já resolvida.")
+    if not body.approve:
+        await db.stage_change_requests.update_one({"id": rid}, {"$set": {"status": "rejected", "resolved_by": actor["id"], "resolved_at": now_iso(), "resolution_reason": body.reason}})
+        await audit("FORMATION_STAGE_CHANGE_REJECTED", actor, request_id=rid)
+        await notify(r["requested_by"], "Solicitação recusada", f"A mudança de etapa de {r['user_name']} foi recusada.")
+        return {"ok": True, "status": "rejected"}
+    ip = request.client.host if request.client else None
+    log = await _apply_stage(r["user_id"], r["to_order"], r.get("reason") or (body.reason or "Aprovado"), "change", actor, ip)
+    await db.stage_change_requests.update_one({"id": rid}, {"$set": {"status": "approved", "resolved_by": actor["id"], "resolved_at": now_iso()}})
+    await audit("FORMATION_STAGE_CHANGE_APPROVED", actor, request_id=rid)
+    await notify(r["requested_by"], "Solicitação aprovada", f"A mudança de etapa de {r['user_name']} foi aprovada.")
+    return {"ok": True, "status": "approved", "log": log}
 
 # --- cursos ---
 @api.post("/courses")
@@ -972,7 +1214,7 @@ async def create_course(body: CourseIn, user: dict = Depends(require_perm("CREAT
 
 @api.get("/courses")
 async def list_courses(user: dict = Depends(get_current_user)):
-    if user["role"] in ("mestre", "formador", "admin"):
+    if user["role"] in STAFF_ROLES:
         items = await db.courses.find().sort("created_at", -1).to_list(500)
     else:
         items = await db.courses.find({"status": "published"}).to_list(500)
@@ -1034,7 +1276,7 @@ async def create_announcement(body: AnnouncementIn, user: dict = Depends(require
 
 @api.get("/announcements")
 async def list_announcements(user: dict = Depends(get_current_user)):
-    if user["role"] in ("mestre", "formador", "admin"):
+    if user["role"] in STAFF_ROLES:
         items = await db.announcements.find().sort([("pinned", -1), ("created_at", -1)]).to_list(200)
     else:
         items = await db.announcements.find({"status": "published"}).sort([("pinned", -1), ("created_at", -1)]).to_list(200)
@@ -1233,7 +1475,7 @@ def media_public(doc: dict) -> dict:
     return doc
 
 def media_accessible(user: dict, doc: dict) -> bool:
-    if user["role"] in ("mestre", "formador", "admin"):
+    if user["role"] in STAFF_ROLES:
         return True
     if doc.get("status") != "published":
         return False
@@ -1445,14 +1687,14 @@ def lk_client():
     return lk_api.LiveKitAPI(url=LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
 
 def broadcast_accessible(user: dict, b: dict) -> bool:
-    if user["role"] in ("mestre", "formador", "admin"):
+    if user["role"] in STAFF_ROLES:
         return True
     st = b.get("stages") or []
     return (not st) or (user["current_stage_order"] in st)
 
 def can_operate_broadcast(user: dict, b: dict) -> bool:
     # dono, apresentador atual, ou EDIT_ALL_CONTENT/mestre
-    return (user["role"] == "mestre" or b.get("owner_id") == user["id"]
+    return (is_top_authority(user) or b.get("owner_id") == user["id"]
             or b.get("presenter_id") == user["id"] or has_perm(user, "EDIT_ALL_CONTENT"))
 
 class BroadcastIn(BaseModel):
@@ -1492,7 +1734,7 @@ def broadcast_public(b: dict) -> dict:
 
 @api.get("/broadcasts")
 async def list_broadcasts(user: dict = Depends(get_current_user)):
-    staff = user["role"] in ("mestre", "formador", "admin")
+    staff = user["role"] in STAFF_ROLES
     items = await db.broadcasts.find().sort("created_at", -1).to_list(300)
     reminded = set(await db.broadcast_reminders.distinct("broadcast_id", {"user_id": user["id"]}))
     out = []
@@ -2014,36 +2256,52 @@ async def seed():
             e["id"] = str(uuid.uuid4()); e["order"] = i
             await db.apologetics.insert_one(e)
 
-    # LOGIN MESTRE (owner) — única autoridade sobre etapas (MANAGE_FORMATION_STAGE)
+    # FUNDADOR (owner) — Kelvin. Autoridade institucional máxima (INDEPENDE da etapa)
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pw = os.environ["ADMIN_PASSWORD"]
     existing = await db.users.find_one({"email": admin_email})
-    admin_id = None
     if not existing:
-        admin_id = str(uuid.uuid4())
-        await db.users.insert_one({"id": admin_id, "name": "Kelvin (Login Mestre)", "email": admin_email,
-                                   "password_hash": hash_password(admin_pw), "role": "mestre",
-                                   "current_stage_order": 6, "formador_id": None, "onboarded": True,
-                                   "blocked": False, "avatar": None, "created_at": now_iso(), "last_active": now_iso()})
+        await db.users.insert_one({"id": str(uuid.uuid4()), "name": "Kelvin (Fundador)", "email": admin_email,
+                                   "password_hash": hash_password(admin_pw), "role": "fundador",
+                                   "current_stage_order": 6, "formation_stage": "CONSAGRADO", "formation_year": None,
+                                   "formation_status": "ATIVO", "formador_id": None, "general_formador_id": None,
+                                   "permissions": [], "onboarded": True, "blocked": False, "avatar": None,
+                                   "created_at": now_iso(), "last_active": now_iso()})
     else:
-        admin_id = existing["id"]
-        if existing.get("role") != "mestre":
-            await db.users.update_one({"email": admin_email}, {"$set": {"role": "mestre", "name": "Kelvin (Login Mestre)"}})
-        # salvaguarda: o Login Mestre nunca deve permanecer bloqueado
+        if existing.get("role") in (None, "mestre", "membro"):
+            await db.users.update_one({"email": admin_email}, {"$set": {"role": "fundador", "name": "Kelvin (Fundador)"}})
         if existing.get("blocked"):
             await db.users.update_one({"email": admin_email}, {"$set": {"blocked": False}})
         if not verify_password(admin_pw, existing["password_hash"]):
             await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_pw)}})
 
-    # demo admin comum (NÃO pode alterar etapas)
-    if not await db.users.find_one({"email": "admin@caminho.app"}):
-        await db.users.insert_one({"id": str(uuid.uuid4()), "name": "Roberto Admin", "email": "admin@caminho.app",
-                                   "password_hash": hash_password("***REMOVED***"), "role": "admin",
-                                   "current_stage_order": 6, "formador_id": None, "onboarded": True,
-                                   "blocked": False, "avatar": None, "created_at": now_iso(), "last_active": now_iso()})
+    # ADMIN técnico PROTEGIDO (imutável por Fundador/Cofundador)
+    adm = await db.users.find_one({"email": "admin@caminho.app"})
+    if not adm:
+        await db.users.insert_one({"id": str(uuid.uuid4()), "name": "Admin Técnico", "email": "admin@caminho.app",
+                                   "password_hash": hash_password("***REMOVED***"), "role": "admin", "admin_protected": True,
+                                   "current_stage_order": 6, "formation_stage": "CONSAGRADO", "formation_year": None,
+                                   "formation_status": "ATIVO", "formador_id": None, "general_formador_id": None,
+                                   "permissions": [], "onboarded": True, "blocked": False, "avatar": None,
+                                   "created_at": now_iso(), "last_active": now_iso()})
+    else:
+        await db.users.update_one({"email": "admin@caminho.app"}, {"$set": {"role": "admin", "admin_protected": True, "blocked": False}})
 
     # settings
     await db.settings.update_one({"key": "app"}, {"$setOnInsert": {"key": "app", "allow_stage_skip": True}}, upsert=True)
+    for _k, _v in {"stage_change_requires_approval": True, "cofundador_can_change_stage": False}.items():
+        await db.settings.update_one({"key": "app", _k: {"$exists": False}}, {"$set": {_k: _v}})
+
+    # backfill separação role×etapa em todos os usuários
+    async for _u in db.users.find({"$or": [{"formation_stage": {"$exists": False}}, {"formation_status": {"$exists": False}}, {"general_formador_id": {"$exists": False}}]}):
+        _fst, _fyr = FORMATION_META.get(_u.get("current_stage_order", 1), ("PRE_VOCACIONADO", None))
+        _upd = {}
+        if "formation_stage" not in _u: _upd["formation_stage"] = _fst
+        if "formation_year" not in _u: _upd["formation_year"] = _fyr
+        if "formation_status" not in _u: _upd["formation_status"] = "EM_FORMACAO" if _u.get("role") == "membro" else "ATIVO"
+        if "general_formador_id" not in _u: _upd["general_formador_id"] = None
+        if _upd:
+            await db.users.update_one({"id": _u["id"]}, {"$set": _upd})
 
     # requisitos por etapa (padrão: exige 100% aulas + lives obrigatórias)
     for s in STAGES:
@@ -2102,6 +2360,26 @@ async def seed():
                                        "current_stage_order": order, "formador_id": fid, "onboarded": True,
                                        "blocked": False, "avatar": None, "created_at": now_iso(),
                                        "last_active": (datetime.now(timezone.utc) - timedelta(days=inactive_days)).isoformat()})
+
+    # demo FORMADOR GERAL + vínculo do formador e membros (escopo de responsabilidade)
+    geral = await db.users.find_one({"email": "geral@caminho.app"})
+    if not geral:
+        gid = str(uuid.uuid4())
+        await db.users.insert_one({"id": gid, "name": "Pe. João (Formador Geral)", "email": "geral@caminho.app",
+            "password_hash": hash_password("***REMOVED***"), "role": "formador_geral",
+            "current_stage_order": 4, "formation_stage": "DISCIPULO", "formation_year": 2, "formation_status": "ATIVO",
+            "formador_id": None, "general_formador_id": None, "permissions": [], "onboarded": True, "blocked": False,
+            "avatar": None, "created_at": now_iso(), "last_active": now_iso()})
+        geral = await db.users.find_one({"id": gid})
+    elif geral.get("role") != "formador_geral":
+        await db.users.update_one({"id": geral["id"]}, {"$set": {"role": "formador_geral", "formation_status": "ATIVO"}})
+        geral = await db.users.find_one({"id": geral["id"]})
+    fd2 = await db.users.find_one({"email": "formador@caminho.app"})
+    if fd2 and not fd2.get("general_formador_id"):
+        await db.users.update_one({"id": fd2["id"]}, {"$set": {"general_formador_id": geral["id"]}})
+    if fd2:
+        await db.users.update_many({"role": "membro", "$or": [{"formador_id": None}, {"formador_id": {"$exists": False}}]},
+                                   {"$set": {"formador_id": fd2["id"]}})
 
 @app.on_event("startup")
 async def on_startup():
