@@ -77,6 +77,25 @@ function Announcements() {
   );
 }
 
+function LiveBadge({ nav }) {
+  const [live, setLive] = useState([]);
+  useEffect(() => { api.get("/live-broadcasts").then((r) => setLive(r.data)).catch(() => setLive([])); }, []);
+  if (!live.length) return null;
+  const b = live[0];
+  return (
+    <button data-testid="dash-live-badge" onClick={() => nav(`/app/ao-vivo/${b.id}`)}
+      className="w-full text-left rounded-2xl border border-red-600/50 bg-red-600/15 p-4 flex items-center gap-3 active:scale-[0.99] transition-transform">
+      <span className="relative flex h-3 w-3"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-500 opacity-75" /><span className="relative inline-flex rounded-full h-3 w-3 bg-red-600" /></span>
+      <div className="flex-1 min-w-0">
+        <p className="text-red-400 text-xs font-bold uppercase tracking-wide">🔴 Ao vivo agora</p>
+        <p className="font-heading font-bold truncate">{b.title}</p>
+        <p className="text-stone-400 text-xs truncate">{b.presenter_name}{live.length > 1 ? ` · +${live.length - 1} transmissão(ões)` : ""}</p>
+      </div>
+      <span className="text-xs font-semibold text-white bg-red-600 rounded-full px-3 py-1.5">Assistir</span>
+    </button>
+  );
+}
+
 export default function Dashboard() {
   const [d, setD] = useState(null);
   const nav = useNavigate();
@@ -109,6 +128,9 @@ export default function Dashboard() {
             </div>
           </div>
         </header>
+
+        {/* Ao vivo agora */}
+        <LiveBadge nav={nav} />
 
         {/* Notificações não lidas */}
         {d.notifications?.length > 0 && (

@@ -5,13 +5,13 @@ import os
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Depends, BackgroundTasks
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional
 from datetime import datetime, timezone, timedelta
-import logging, uuid, bcrypt, jwt, re
+import logging, uuid, bcrypt, jwt, re, secrets
 
 try:
     from emergentintegrations.llm.chat import LlmChat, UserMessage
@@ -1474,6 +1474,17 @@ class BroadcastPatch(BaseModel):
 class ChatMsgIn(BaseModel):
     text: str
 
+DEFAULT_SCENE = {"layout": "full", "lower_third": {"name": "", "role": "", "visible": False},
+                 "banner": {"text": "", "visible": False}}
+
+class Overlay(BaseModel):
+    layout: str = "full"
+    lower_third: dict = Field(default_factory=lambda: {"name": "", "role": "", "visible": False})
+    banner: dict = Field(default_factory=lambda: {"text": "", "visible": False})
+
+class ScenesIn(BaseModel):
+    scenes: List[dict] = []
+
 def broadcast_public(b: dict) -> dict:
     b = dict(b)
     b.pop("_id", None)
@@ -1483,13 +1494,16 @@ def broadcast_public(b: dict) -> dict:
 async def list_broadcasts(user: dict = Depends(get_current_user)):
     staff = user["role"] in ("mestre", "formador", "admin")
     items = await db.broadcasts.find().sort("created_at", -1).to_list(300)
+    reminded = set(await db.broadcast_reminders.distinct("broadcast_id", {"user_id": user["id"]}))
     out = []
     for b in items:
         if not broadcast_accessible(user, b):
             continue
         if not staff and b.get("status") not in ("live", "scheduled"):
             continue
-        out.append(broadcast_public(b))
+        d = broadcast_public(b)
+        d["reminded"] = b["id"] in reminded
+        out.append(d)
     return out
 
 @api.post("/broadcasts")
@@ -1499,12 +1513,13 @@ async def create_broadcast(body: BroadcastIn, user: dict = Depends(require_perm(
         "id": bid, "title": body.title, "description": body.description,
         "stages": body.stages, "scheduled_at": body.scheduled_at, "preset": body.preset,
         "mode": body.mode if body.mode in ("simple", "pro") else "simple",
-        "status": "idle", "room_name": f"caminho-{bid[:8]}",
+        "status": "scheduled" if body.scheduled_at else "idle", "room_name": f"caminho-{bid[:8]}",
         "owner_id": user["id"], "owner_name": user["name"],
         "presenter_id": user["id"], "presenter_name": user["name"],
         "chat_enabled": True, "created_at": now_iso(),
         "started_at": None, "ended_at": None,
         "viewers_peak": 0, "duration_min": None,
+        "scenes": [], "active_scene": dict(DEFAULT_SCENE),
     }
     await db.broadcasts.insert_one(doc)
     await audit("create_broadcast", user, broadcast_id=bid)
@@ -1517,7 +1532,9 @@ async def get_broadcast(bid: str, user: dict = Depends(get_current_user)):
         raise HTTPException(404, "Transmissão não encontrada")
     if not broadcast_accessible(user, b):
         raise HTTPException(403, "Esta transmissão não está liberada para a sua etapa atual.")
-    return broadcast_public(b)
+    d = broadcast_public(b)
+    d["reminded"] = bool(await db.broadcast_reminders.find_one({"broadcast_id": bid, "user_id": user["id"]}))
+    return d
 
 @api.patch("/broadcasts/{bid}")
 async def edit_broadcast(bid: str, body: BroadcastPatch, user: dict = Depends(require_perm("EDIT_LIVE"))):
@@ -1639,7 +1656,8 @@ async def broadcast_heartbeat(bid: str, user: dict = Depends(get_current_user)):
     count = await db.broadcast_presence.count_documents({"broadcast_id": bid, "at": {"$gt": cutoff}})
     if count > (b.get("viewers_peak") or 0):
         await db.broadcasts.update_one({"id": bid}, {"$set": {"viewers_peak": count}})
-    return {"viewers": count, "viewers_peak": max(count, b.get("viewers_peak") or 0)}
+    return {"viewers": count, "viewers_peak": max(count, b.get("viewers_peak") or 0),
+            "active_scene": b.get("active_scene") or dict(DEFAULT_SCENE)}
 
 @api.get("/broadcasts/{bid}/stats")
 async def broadcast_stats(bid: str, user: dict = Depends(get_current_user)):
@@ -1650,7 +1668,73 @@ async def broadcast_stats(bid: str, user: dict = Depends(get_current_user)):
     count = await db.broadcast_presence.count_documents({"broadcast_id": bid, "at": {"$gt": cutoff}})
     return {"viewers": count, "viewers_peak": b.get("viewers_peak") or 0,
             "status": b.get("status"), "started_at": b.get("started_at"),
-            "duration_min": b.get("duration_min"), "presenter_name": b.get("presenter_name")}
+            "duration_min": b.get("duration_min"), "presenter_name": b.get("presenter_name"),
+            "active_scene": b.get("active_scene") or dict(DEFAULT_SCENE)}
+
+# --- Fase 2: cenas e overlays (produção visual) ---
+@api.put("/broadcasts/{bid}/scenes")
+async def save_scenes(bid: str, body: ScenesIn, user: dict = Depends(require_perm("MANAGE_SCENES"))):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    if not can_operate_broadcast(user, b):
+        raise HTTPException(403, "Você não é responsável por esta transmissão.")
+    await db.broadcasts.update_one({"id": bid}, {"$set": {"scenes": body.scenes}})
+    return {"ok": True, "scenes": body.scenes}
+
+@api.post("/broadcasts/{bid}/active-scene")
+async def set_active_scene(bid: str, body: Overlay, user: dict = Depends(get_current_user)):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    if not can_operate_broadcast(user, b):
+        raise HTTPException(403, "Você não é responsável por esta transmissão.")
+    scene = {"layout": body.layout, "lower_third": body.lower_third, "banner": body.banner}
+    await db.broadcasts.update_one({"id": bid}, {"$set": {"active_scene": scene}})
+    return {"ok": True, "active_scene": scene}
+
+# --- badge ao vivo (dashboard) ---
+@api.get("/live-broadcasts")
+async def live_broadcasts(user: dict = Depends(get_current_user)):
+    items = await db.broadcasts.find({"status": "live"}).sort("started_at", -1).to_list(50)
+    return [broadcast_public(b) for b in items if broadcast_accessible(user, b)]
+
+# --- agenda: lembrar-me ---
+@api.post("/broadcasts/{bid}/remind")
+async def remind_broadcast(bid: str, user: dict = Depends(get_current_user)):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    if not broadcast_accessible(user, b):
+        raise HTTPException(403, "Sem acesso a esta transmissão.")
+    existing = await db.broadcast_reminders.find_one({"broadcast_id": bid, "user_id": user["id"]})
+    if existing:
+        await db.broadcast_reminders.delete_one({"broadcast_id": bid, "user_id": user["id"]})
+        return {"ok": True, "reminded": False}
+    await db.broadcast_reminders.insert_one({"id": str(uuid.uuid4()), "broadcast_id": bid,
+        "user_id": user["id"], "notified": False, "at": now_iso()})
+    return {"ok": True, "reminded": True}
+
+# --- cron: lembretes de lives agendadas (dispara ~15 min antes) ---
+async def _process_broadcast_reminders():
+    now = datetime.now(timezone.utc)
+    window = (now + timedelta(minutes=15)).isoformat()
+    now_s = now.isoformat()
+    async for b in db.broadcasts.find({"status": "scheduled", "scheduled_at": {"$gt": now_s, "$lte": window}}):
+        async for r in db.broadcast_reminders.find({"broadcast_id": b["id"], "notified": False}):
+            await notify(r["user_id"], "📺 Sua live começa em breve", f"'{b['title']}' começa em poucos minutos.")
+            await db.broadcast_reminders.update_one({"id": r["id"]}, {"$set": {"notified": True}})
+
+@api.post("/cron/broadcast-reminders")
+async def cron_broadcast_reminders(request: Request, background: BackgroundTasks):
+    # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+    secret = os.environ.get("WEBHOOK_CRON_SECRET", "")
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:] if auth.startswith("Bearer ") else ""
+    if not secret or not token or not secrets.compare_digest(token, secret):
+        raise HTTPException(401, "Não autorizado")
+    background.add_task(_process_broadcast_reminders)
+    return {"ok": True}
 
 # --- chat + moderação ---
 @api.get("/broadcasts/{bid}/chat")

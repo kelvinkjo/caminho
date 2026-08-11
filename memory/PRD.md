@@ -17,6 +17,12 @@ Prioridades absolutas do projeto: **1) segurança das etapas, 2) acompanhamento 
 ## Etapas (enum, ordem 1→6)
 PRE_VOCACIONADO → VOCACIONADO → DISCIPULO_ANO_1 → DISCIPULO_ANO_2 → COMPROMISSADO → CONSAGRADO. Cada uma com tema, pergunta, ícone, descrição.
 
+## Implementado (2026-06 — iteração 9) 🎬 Transmissão Fase 2 + Agenda + Badge
+- **Fase 2 (Produção Visual)** no estúdio: compartilhamento de tela (`getDisplayMedia`), 4 layouts (tela cheia, PiP, lado a lado, conteúdo+câmera), **lower-third** (identificação nome/função), **banner** e **cenas** (salvar/aplicar/excluir). Overlays sincronizam com espectadores via `active_scene` (polling em heartbeat/stats). Endpoints: `PUT /broadcasts/{id}/scenes` (MANAGE_SCENES), `POST /broadcasts/{id}/active-scene`. Componente `OverlayLayer` reutilizado em estúdio e player.
+- **Agenda de Lives**: criar com `scheduled_at` → status `scheduled`; card com **contagem regressiva** ao vivo e botão **"Lembrar-me"** (`POST /broadcasts/{id}/remind`, toggle; flag `reminded` na listagem). Cron `POST /api/cron/broadcast-reminders` (auth `WEBHOOK_CRON_SECRET`, BackgroundTasks) avisa "📺 Sua live começa em breve" ~15 min antes; agendado em `.emergent/crons.yml` (*/15). Notificação automática ao ficar ao vivo já existente.
+- **Badge Ao Vivo** no Dashboard: `GET /api/live-broadcasts` + `LiveBadge` mostram "🔴 AO VIVO AGORA" para transmissões da etapa do membro, com atalho para assistir.
+- Invariante etapa preservado em todos os novos endpoints. Testado: 5/5 novos backend + 18/18 UI (100%). Melhoria: "salvar cena" usa input inline (melhor em mobile).
+
 ## Implementado (2026-06 — iteração 8) 🔴 Central de Transmissão ao Vivo (LiveKit WebRTC) — FASE 1
 - **Integração LiveKit** (WebRTC SFU): captura via APIs oficiais do navegador (`getUserMedia`); tokens JWT curtos (15 min) gerados **só no backend**, papel (broadcaster/viewer) derivado no servidor. Segredos só em `backend/.env` (`LIVEKIT_URL/API_KEY/API_SECRET`). ⚠️ **Credenciais ainda não fornecidas** pelo usuário → `/api/livekit/status` = `configured:false` e `/broadcasts/{id}/token` responde **503 controlado**; app continua funcionando (câmera/preview/checklist/chat operam).
 - **Permissões novas** (só Mestre concede): MANAGE_LIVE, MANAGE_CAMERA, MANAGE_MICROPHONE, MANAGE_SCENES, MANAGE_SOURCES, VIEW_LIVE_ANALYTICS, TAKE_OVER_LIVE (+ CREATE/EDIT/START/END/MODERATE_LIVE já existentes).

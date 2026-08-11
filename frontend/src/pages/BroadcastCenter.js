@@ -3,10 +3,19 @@ import { useNavigate } from "react-router-dom";
 import { api, apiError } from "../lib/api";
 import { useAuth } from "../context/AuthContext";
 import { Shell } from "../components/Shell";
-import { Radio, Loader2, Plus, Video, Users, Clock } from "lucide-react";
+import { Radio, Loader2, Plus, Video, Users, Clock, Bell, BellRing } from "lucide-react";
 import { toast } from "sonner";
 
 const STAGES = ["Pré-Voc.", "Vocac.", "Disc. 1", "Disc. 2", "Compr.", "Consag."];
+
+function Countdown({ target }) {
+  const [left, setLeft] = useState(Math.max(0, new Date(target) - Date.now()));
+  useEffect(() => { const t = setInterval(() => setLeft(Math.max(0, new Date(target) - Date.now())), 1000); return () => clearInterval(t); }, [target]);
+  const s = Math.floor(left / 1000);
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  const txt = d > 0 ? `${d}d ${h}h` : `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  return <span data-testid="countdown" className="text-orange-400 font-bold tabular-nums">🔴 começa em {txt}</span>;
+}
 
 export default function BroadcastCenter() {
   const { user } = useAuth();
@@ -16,7 +25,7 @@ export default function BroadcastCenter() {
   const canOperate = (b) => user?.role === "mestre" || b.owner_id === user?.id || b.presenter_id === user?.id || perms.includes("START_LIVE");
 
   const [items, setItems] = useState(null);
-  const [form, setForm] = useState({ title: "", description: "", stages: [], mode: "simple" });
+  const [form, setForm] = useState({ title: "", description: "", stages: [], mode: "simple", scheduled_at: "" });
   const [showForm, setShowForm] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -29,12 +38,19 @@ export default function BroadcastCenter() {
     if (!form.title.trim()) return toast.error("Informe o título.");
     setBusy(true);
     try {
-      const { data } = await api.post("/broadcasts", form);
-      toast.success("Transmissão criada.");
-      setForm({ title: "", description: "", stages: [], mode: "simple" }); setShowForm(false);
-      nav(`/app/estudio/${data.id}`);
+      const payload = { ...form, scheduled_at: form.scheduled_at ? new Date(form.scheduled_at).toISOString() : "" };
+      const { data } = await api.post("/broadcasts", payload);
+      toast.success(payload.scheduled_at ? "Transmissão agendada." : "Transmissão criada.");
+      setForm({ title: "", description: "", stages: [], mode: "simple", scheduled_at: "" }); setShowForm(false);
+      if (payload.scheduled_at) load(); else nav(`/app/estudio/${data.id}`);
     } catch (e) { toast.error(apiError(e.response?.data?.detail)); }
     finally { setBusy(false); }
+  };
+
+  const remind = async (e, b) => {
+    e.stopPropagation();
+    try { const { data } = await api.post(`/broadcasts/${b.id}/remind`); toast.success(data.reminded ? "Você será avisado antes de começar." : "Lembrete removido."); load(); }
+    catch (err) { toast.error(apiError(err.response?.data?.detail)); }
   };
 
   const open = (b) => {
@@ -64,7 +80,9 @@ export default function BroadcastCenter() {
             <div className="flex flex-wrap gap-1.5 mb-3">
               {STAGES.map((s, i) => <button key={i} type="button" data-testid={`broadcast-stage-${i + 1}`} onClick={() => toggleStage(i + 1)} className={`text-xs rounded-full px-2.5 py-1 ${form.stages.includes(i + 1) ? "bg-orange-600 text-white" : "bg-stone-800 text-stone-400 border border-stone-700"}`}>{s}</button>)}
             </div>
-            <button data-testid="broadcast-create-submit" disabled={busy} onClick={submit} className="w-full min-h-[46px] rounded-lg bg-orange-600 hover:bg-orange-500 text-white text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-60">{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Criar e abrir estúdio</button>
+            <p className="text-xs text-stone-500 mb-1">Agendar (opcional):</p>
+            <input data-testid="broadcast-schedule" type="datetime-local" value={form.scheduled_at} onChange={(e) => setForm({ ...form, scheduled_at: e.target.value })} className="w-full mb-3 bg-stone-800 border border-stone-700 rounded-lg px-3 py-2.5 text-stone-100 outline-none focus:border-orange-600/60" />
+            <button data-testid="broadcast-create-submit" disabled={busy} onClick={submit} className="w-full min-h-[46px] rounded-lg bg-orange-600 hover:bg-orange-500 text-white text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-60">{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} {form.scheduled_at ? "Agendar transmissão" : "Criar e abrir estúdio"}</button>
           </section>
         )}
 
@@ -79,11 +97,17 @@ export default function BroadcastCenter() {
                 <p className="font-heading font-bold flex-1">{b.title}</p>
               </div>
               {b.description && <p className="text-stone-400 text-sm">{b.description}</p>}
-              <p className="text-stone-500 text-xs mt-2 flex items-center gap-3">
+              <p className="text-stone-500 text-xs mt-2 flex items-center gap-3 flex-wrap">
                 <span className="flex items-center gap-1"><Video className="w-3 h-3" /> {b.presenter_name}</span>
+                {b.status === "scheduled" && b.scheduled_at && <Countdown target={b.scheduled_at} />}
                 {b.status === "ended" && b.duration_min != null && <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {b.duration_min} min</span>}
                 {b.viewers_peak > 0 && <span className="flex items-center gap-1"><Users className="w-3 h-3" /> pico {b.viewers_peak}</span>}
               </p>
+              {b.status === "scheduled" && (
+                <span onClick={(e) => remind(e, b)} data-testid={`remind-${b.id}`} className={`mt-3 inline-flex items-center gap-1.5 text-xs rounded-full px-3 py-1.5 cursor-pointer ${b.reminded ? "bg-orange-600 text-white" : "bg-stone-800 border border-stone-700 text-stone-300"}`}>
+                  {b.reminded ? <BellRing className="w-3.5 h-3.5" /> : <Bell className="w-3.5 h-3.5" />} {b.reminded ? "Lembrete ativo" : "Lembrar-me"}
+                </span>
+              )}
             </button>
           ))}
         </div>

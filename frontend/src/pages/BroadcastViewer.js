@@ -4,6 +4,7 @@ import { api, apiError } from "../lib/api";
 import { Shell } from "../components/Shell";
 import { ChatPanel } from "./ChatPanel";
 import { connectViewer } from "../lib/livekit";
+import { OverlayLayer } from "../lib/overlays";
 import { ArrowLeft, Loader2, Users, Maximize, Radio, Lock } from "lucide-react";
 
 export default function BroadcastViewer() {
@@ -14,6 +15,7 @@ export default function BroadcastViewer() {
   const [lkConfigured, setLkConfigured] = useState(true);
   const [connState, setConnState] = useState("connecting");
   const [viewers, setViewers] = useState(0);
+  const [activeScene, setActiveScene] = useState(null);
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const roomRef = useRef(null);
@@ -43,11 +45,11 @@ export default function BroadcastViewer() {
     // eslint-disable-next-line
   }, [id]);
 
-  // heartbeat de espectador
+  // heartbeat de espectador + overlays da cena ativa
   useEffect(() => {
     if (b?.status !== "live") return;
-    const beat = () => api.post(`/broadcasts/${id}/heartbeat`).then((r) => setViewers(r.data.viewers)).catch(() => {});
-    beat(); const t = setInterval(beat, 8000);
+    const beat = () => api.post(`/broadcasts/${id}/heartbeat`).then((r) => { setViewers(r.data.viewers); setActiveScene(r.data.active_scene); }).catch(() => {});
+    beat(); const t = setInterval(beat, 5000);
     return () => clearInterval(t);
     // eslint-disable-next-line
   }, [b?.status, id]);
@@ -77,6 +79,7 @@ export default function BroadcastViewer() {
           )}
           {b.status === "live" && connState === "connecting" && lkConfigured && <div className="absolute inset-0 flex items-center justify-center"><Loader2 className="animate-spin text-orange-600" /></div>}
           {b.status === "live" && <button data-testid="fullscreen-btn" onClick={fullscreen} className="absolute bottom-3 right-3 w-9 h-9 rounded-full bg-black/60 flex items-center justify-center text-white"><Maximize className="w-4 h-4" /></button>}
+          {b.status === "live" && <OverlayLayer scene={activeScene} />}
         </div>
 
         {b.status === "live" && (

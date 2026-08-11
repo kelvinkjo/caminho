@@ -1445,3 +1445,261 @@ class TestBroadcastStageInvariant:
             assert stage_after == stage_before
         finally:
             requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+
+
+# ================= ITERATION 9 — Fase 2 (Cenas/Overlays) + Agenda + Badge Ao Vivo =================
+import datetime as _dt
+from dotenv import dotenv_values as _dv
+
+_BACKEND_ENV = _dv("/app/backend/.env")
+WEBHOOK_CRON_SECRET = os.environ.get("WEBHOOK_CRON_SECRET") or _BACKEND_ENV.get("WEBHOOK_CRON_SECRET", "")
+
+
+def _iso_in(minutes: int) -> str:
+    return (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=minutes)).isoformat()
+
+
+class TestScenesAndActiveScene:
+    """Fase 2 — PUT /scenes (MANAGE_SCENES + dono) e POST /active-scene (dono/operador)."""
+
+    def test_save_scenes_and_active_scene_flow(self, formador_s, membro_s, mestre_s):
+        # formador cria broadcast (é dono, tem MANAGE_SCENES)
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC scenes", "stages": [3]},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200, r.text
+        bid = r.json()["id"]
+        try:
+            # PUT scenes com uma cena custom
+            scenes = [{"name": "Cena 1", "layout": "pip",
+                       "lower_third": {"name": "Formador", "role": "Apresentador", "visible": True},
+                       "banner": {"text": "Aviso", "visible": True}}]
+            r = requests.put(f"{API}/broadcasts/{bid}/scenes",
+                             json={"scenes": scenes}, headers=_h(formador_s["token"]))
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["ok"] is True
+            assert data["scenes"] == scenes
+
+            # Confirma persistência via GET
+            g = requests.get(f"{API}/broadcasts/{bid}", headers=_h(formador_s["token"])).json()
+            assert g["scenes"] == scenes
+
+            # POST active-scene define overlay atual
+            payload = {"layout": "side",
+                       "lower_third": {"name": "João", "role": "Formador", "visible": True},
+                       "banner": {"text": "🔴 Ao vivo agora", "visible": True}}
+            r = requests.post(f"{API}/broadcasts/{bid}/active-scene",
+                              json=payload, headers=_h(formador_s["token"]))
+            assert r.status_code == 200, r.text
+            active = r.json()["active_scene"]
+            assert active["layout"] == "side"
+            assert active["lower_third"]["name"] == "João"
+            assert active["banner"]["visible"] is True
+
+            # start live para acesso do membro; overlays devem chegar via stats/heartbeat
+            requests.post(f"{API}/broadcasts/{bid}/start", headers=_h(formador_s["token"]))
+            stats = requests.get(f"{API}/broadcasts/{bid}/stats",
+                                 headers=_h(membro_s["token"])).json()
+            assert "active_scene" in stats
+            assert stats["active_scene"]["layout"] == "side"
+            assert stats["active_scene"]["lower_third"]["name"] == "João"
+
+            hb = requests.post(f"{API}/broadcasts/{bid}/heartbeat",
+                               headers=_h(membro_s["token"])).json()
+            assert hb["active_scene"]["banner"]["text"] == "🔴 Ao vivo agora"
+
+            # Membro comum (sem MANAGE_SCENES) → 403 no PUT /scenes
+            r = requests.put(f"{API}/broadcasts/{bid}/scenes",
+                             json={"scenes": []}, headers=_h(membro_s["token"]))
+            assert r.status_code == 403, r.text
+
+            # Membro comum não é operador → 403 no active-scene
+            r = requests.post(f"{API}/broadcasts/{bid}/active-scene",
+                              json=payload, headers=_h(membro_s["token"]))
+            assert r.status_code == 403, r.text
+        finally:
+            requests.post(f"{API}/broadcasts/{bid}/end", headers=_h(formador_s["token"]))
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+
+
+class TestBroadcastScheduleAndRemind:
+    """Agenda: criação scheduled_at, listagem por etapa, toggle remind, flag reminded."""
+
+    def test_scheduled_creation_and_reminder_toggle(self, formador_s, membro_s, prevoc_s, mestre_s):
+        sched = _iso_in(30)
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC scheduled", "stages": [3], "scheduled_at": sched},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200, r.text
+        bc = r.json()
+        bid = bc["id"]
+        assert bc["status"] == "scheduled"
+        assert bc["scheduled_at"] == sched
+        try:
+            # Membro etapa 3 vê a live agendada com reminded=False
+            lst = requests.get(f"{API}/broadcasts", headers=_h(membro_s["token"])).json()
+            match = [x for x in lst if x["id"] == bid]
+            assert len(match) == 1
+            assert match[0]["status"] == "scheduled"
+            assert match[0]["reminded"] is False
+
+            # Membro etapa 1 (prevoc) NÃO vê a live stage-3
+            lst_p = requests.get(f"{API}/broadcasts", headers=_h(prevoc_s["token"])).json()
+            assert not any(x["id"] == bid for x in lst_p)
+
+            # POST remind → true
+            r = requests.post(f"{API}/broadcasts/{bid}/remind", headers=_h(membro_s["token"]))
+            assert r.status_code == 200, r.text
+            assert r.json()["reminded"] is True
+
+            # GET single: reminded True
+            g = requests.get(f"{API}/broadcasts/{bid}", headers=_h(membro_s["token"])).json()
+            assert g["reminded"] is True
+
+            # GET list: reminded True
+            lst = requests.get(f"{API}/broadcasts", headers=_h(membro_s["token"])).json()
+            assert next(x for x in lst if x["id"] == bid)["reminded"] is True
+
+            # POST remind again → toggle off
+            r = requests.post(f"{API}/broadcasts/{bid}/remind", headers=_h(membro_s["token"]))
+            assert r.status_code == 200
+            assert r.json()["reminded"] is False
+
+            # prevoc → 403 no remind (sem acesso à etapa)
+            r = requests.post(f"{API}/broadcasts/{bid}/remind", headers=_h(prevoc_s["token"]))
+            assert r.status_code == 403
+        finally:
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+
+
+class TestCronBroadcastReminders:
+    """POST /api/cron/broadcast-reminders exige Bearer WEBHOOK_CRON_SECRET; dispara notificação."""
+
+    def test_cron_auth_and_notification_dispatch(self, formador_s, membro_s, mestre_s):
+        # 401 sem Authorization
+        r = requests.post(f"{API}/cron/broadcast-reminders")
+        assert r.status_code == 401, r.text
+
+        # 401 com token errado
+        r = requests.post(f"{API}/cron/broadcast-reminders",
+                          headers={"Authorization": "Bearer wrong-secret"})
+        assert r.status_code == 401
+
+        assert WEBHOOK_CRON_SECRET, "WEBHOOK_CRON_SECRET missing"
+
+        # cria live scheduled dentro da janela de 15 min
+        sched = _iso_in(10)
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC cron reminder", "stages": [3], "scheduled_at": sched},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200, r.text
+        bid = r.json()["id"]
+        try:
+            # membro registra lembrete
+            r = requests.post(f"{API}/broadcasts/{bid}/remind", headers=_h(membro_s["token"]))
+            assert r.status_code == 200 and r.json()["reminded"] is True
+
+            # captura notificações do membro (baseline)
+            before = requests.get(f"{API}/notifications",
+                                  headers=_h(membro_s["token"])).json()
+            before_ids = {n["id"] for n in before}
+
+            # dispara cron com Bearer válido → 2xx
+            r = requests.post(f"{API}/cron/broadcast-reminders",
+                              headers={"Authorization": f"Bearer {WEBHOOK_CRON_SECRET}"})
+            assert r.status_code == 200, r.text
+
+            # BackgroundTasks é assíncrono → aguarda
+            import time
+            found = None
+            for _ in range(10):
+                time.sleep(1)
+                after = requests.get(f"{API}/notifications",
+                                     headers=_h(membro_s["token"])).json()
+                new = [n for n in after if n["id"] not in before_ids]
+                cand = [n for n in new if "começa em breve" in (n.get("title") or "")]
+                if cand:
+                    found = cand[0]
+                    break
+            assert found is not None, "expected '📺 Sua live começa em breve' notification"
+
+            # segunda chamada não duplica (notified=True já)
+            r = requests.post(f"{API}/cron/broadcast-reminders",
+                              headers={"Authorization": f"Bearer {WEBHOOK_CRON_SECRET}"})
+            assert r.status_code == 200
+            time.sleep(2)
+            after2 = requests.get(f"{API}/notifications",
+                                  headers=_h(membro_s["token"])).json()
+            dup = [n for n in after2 if n["id"] not in before_ids
+                   and "começa em breve" in (n.get("title") or "")]
+            assert len(dup) == 1, f"cron não deve duplicar lembrete (got {len(dup)})"
+        finally:
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+
+
+class TestLiveBroadcastsBadge:
+    """GET /api/live-broadcasts filtra por status=live e por etapa do usuário."""
+
+    def test_live_badge_visible_to_stage_member_only(self, formador_s, membro_s, prevoc_s, mestre_s):
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC live badge", "stages": [3]},
+                          headers=_h(formador_s["token"]))
+        bid = r.json()["id"]
+        try:
+            # Antes de start: NÃO deve aparecer
+            lst = requests.get(f"{API}/live-broadcasts", headers=_h(membro_s["token"])).json()
+            assert not any(x["id"] == bid for x in lst)
+
+            # start
+            r = requests.post(f"{API}/broadcasts/{bid}/start", headers=_h(formador_s["token"]))
+            assert r.status_code == 200, r.text
+
+            # Membro etapa 3 vê
+            lst = requests.get(f"{API}/live-broadcasts", headers=_h(membro_s["token"])).json()
+            assert any(x["id"] == bid and x["status"] == "live" for x in lst)
+
+            # Prevoc (etapa 1) não vê
+            lst_p = requests.get(f"{API}/live-broadcasts", headers=_h(prevoc_s["token"])).json()
+            assert not any(x["id"] == bid for x in lst_p)
+        finally:
+            requests.post(f"{API}/broadcasts/{bid}/end", headers=_h(formador_s["token"]))
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+
+
+class TestBroadcastPhase2StageInvariant:
+    """INVARIANTE: nenhum endpoint novo (scenes/active-scene/remind/live-broadcasts/cron)
+    altera user.current_stage_order."""
+
+    def test_new_endpoints_do_not_mutate_stage(self, formador_s, membro_s, mestre_s):
+        membro_id = _me(membro_s["token"])["id"]
+        _reset_membro_to_stage_3(mestre_s["token"], membro_id)
+        before = requests.get(f"{API}/master/users/{membro_id}",
+                              headers=_h(mestre_s["token"])).json()["current_stage_order"]
+
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC invariant p2", "stages": [3],
+                                "scheduled_at": _iso_in(10)},
+                          headers=_h(formador_s["token"]))
+        bid = r.json()["id"]
+        try:
+            requests.put(f"{API}/broadcasts/{bid}/scenes",
+                         json={"scenes": [{"name": "S1", "layout": "full",
+                                           "lower_third": {"name": "", "role": "", "visible": False},
+                                           "banner": {"text": "", "visible": False}}]},
+                         headers=_h(formador_s["token"]))
+            requests.post(f"{API}/broadcasts/{bid}/active-scene",
+                          json={"layout": "pip",
+                                "lower_third": {"name": "X", "role": "Y", "visible": True},
+                                "banner": {"text": "Z", "visible": True}},
+                          headers=_h(formador_s["token"]))
+            requests.post(f"{API}/broadcasts/{bid}/remind", headers=_h(membro_s["token"]))
+            requests.get(f"{API}/live-broadcasts", headers=_h(membro_s["token"]))
+            requests.post(f"{API}/cron/broadcast-reminders",
+                          headers={"Authorization": f"Bearer {WEBHOOK_CRON_SECRET}"})
+
+            after = requests.get(f"{API}/master/users/{membro_id}",
+                                 headers=_h(mestre_s["token"])).json()["current_stage_order"]
+            assert after == before, f"stage mudou de {before} para {after}"
+        finally:
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))

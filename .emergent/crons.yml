@@ -1,0 +1,8 @@
+crons:
+  - name: broadcast-reminders
+    description: "Avisa membros que pediram lembrete quando a live agendada comeca em ~15 min"
+    cron: "*/15 * * * *"
+    endpoint: "{{BASE_URL}}/api/cron/broadcast-reminders"
+    method: POST
+    # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+    enabled: true
