@@ -1125,3 +1125,323 @@ class TestExternalMediaCRUDAndAccess:
                          headers=_h(mestre_s["token"]))
         assert r.status_code == 200
         assert set(r.json()["enabled"]) == {"youtube", "vimeo"}
+
+
+# ---------------- ITERATION 8 — CENTRAL DE TRANSMISSÃO (LiveKit não configurado) ----------------
+NEW_LIVE_PERMS = {"MANAGE_LIVE", "MANAGE_CAMERA", "MANAGE_MICROPHONE",
+                  "MANAGE_SCENES", "MANAGE_SOURCES", "VIEW_LIVE_ANALYTICS", "TAKE_OVER_LIVE"}
+
+
+class TestLiveKitStatusAndPermissions:
+    def test_livekit_status_not_configured(self, membro_s):
+        r = requests.get(f"{API}/livekit/status", headers=_h(membro_s["token"]))
+        assert r.status_code == 200
+        data = r.json()
+        assert data == {"configured": False}, data
+
+    def test_livekit_status_requires_auth(self):
+        assert requests.get(f"{API}/livekit/status").status_code == 401
+
+    def test_permissions_catalog_has_new_live_perms(self, formador_s):
+        r = requests.get(f"{API}/permissions/catalog", headers=_h(formador_s["token"]))
+        assert r.status_code == 200
+        perms = set(r.json()["permissions"])
+        missing = NEW_LIVE_PERMS - perms
+        assert not missing, f"missing perms: {missing}"
+
+
+def _ensure_prevoc_stage_1(mestre_token):
+    prevoc = _login(PREVOC)
+    if prevoc["user"]["current_stage_order"] != 1:
+        r = requests.post(f"{API}/master/users/{prevoc['user']['id']}/stage",
+                          json={"new_stage_order": 1, "reason": "TEST reset to stage 1", "action": "change"},
+                          headers=_h(mestre_token))
+        assert r.status_code == 200
+
+
+class TestBroadcastCRUDAndAccess:
+    def test_member_cannot_create_broadcast(self, membro_s):
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST membro cria", "stages": [3]},
+                          headers=_h(membro_s["token"]))
+        assert r.status_code == 403
+
+    def test_formador_creates_broadcast(self, formador_s, mestre_s):
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC formador cria", "description": "d", "stages": [3], "mode": "simple"},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200, r.text
+        b = r.json()
+        assert b["title"] == "TEST_BC formador cria"
+        assert b["stages"] == [3]
+        assert b["status"] in ("scheduled", "created", "idle")  # default before start
+        assert "id" in b and "room_name" in b
+        # persistence via GET
+        r2 = requests.get(f"{API}/broadcasts/{b['id']}", headers=_h(formador_s["token"]))
+        assert r2.status_code == 200
+        assert r2.json()["id"] == b["id"]
+        # cleanup via mestre (MANAGE_LIVE)
+        requests.delete(f"{API}/broadcasts/{b['id']}", headers=_h(mestre_s["token"]))
+
+    def test_get_broadcast_stage_forbidden(self, formador_s, mestre_s):
+        _ensure_prevoc_stage_1(mestre_s["token"])
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC restrita etapa3", "stages": [3]},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200
+        bid = r.json()["id"]
+        try:
+            prevoc = _login(PREVOC)
+            g = requests.get(f"{API}/broadcasts/{bid}", headers=_h(prevoc["token"]))
+            assert g.status_code == 403
+        finally:
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+
+    def test_list_filters_by_stage_and_status(self, formador_s, membro_s, mestre_s):
+        # create two broadcasts: one for stage 3 (visible to membro), one for stage 5 (not)
+        r1 = requests.post(f"{API}/broadcasts",
+                           json={"title": "TEST_BC list-visible", "stages": [3]},
+                           headers=_h(formador_s["token"]))
+        r2 = requests.post(f"{API}/broadcasts",
+                           json={"title": "TEST_BC list-hidden", "stages": [5]},
+                           headers=_h(formador_s["token"]))
+        assert r1.status_code == 200 and r2.status_code == 200
+        b1, b2 = r1.json(), r2.json()
+        try:
+            # start b1 so it becomes 'live' and is visible to membro (scheduled/live only)
+            s = requests.post(f"{API}/broadcasts/{b1['id']}/start", headers=_h(formador_s["token"]))
+            assert s.status_code == 200, s.text
+            # membro list
+            lst = requests.get(f"{API}/broadcasts", headers=_h(membro_s["token"])).json()
+            ids = {b["id"] for b in lst}
+            assert b1["id"] in ids, "membro (etapa 3) deveria ver broadcast live etapa 3"
+            assert b2["id"] not in ids, "membro (etapa 3) NÃO deveria ver broadcast etapa 5"
+            # staff (formador) vê ambos
+            lst_staff = requests.get(f"{API}/broadcasts", headers=_h(formador_s["token"])).json()
+            ids_staff = {b["id"] for b in lst_staff}
+            assert {b1["id"], b2["id"]} <= ids_staff
+        finally:
+            requests.post(f"{API}/broadcasts/{b1['id']}/end", headers=_h(formador_s["token"]))
+            requests.delete(f"{API}/broadcasts/{b1['id']}", headers=_h(mestre_s["token"]))
+            requests.delete(f"{API}/broadcasts/{b2['id']}", headers=_h(mestre_s["token"]))
+
+
+class TestBroadcastLifecycleAndNotify:
+    def test_start_notifies_stage_members_and_end_calculates_duration(self, formador_s, membro_s, mestre_s):
+        _reset_membro_to_stage_3(mestre_s["token"], _me(membro_s["token"])["id"])
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC start-notify", "stages": [3]},
+                          headers=_h(formador_s["token"]))
+        assert r.status_code == 200
+        bid = r.json()["id"]
+        try:
+            # Snapshot notifications count for membro
+            n0 = requests.get(f"{API}/notifications", headers=_h(membro_s["token"])).json()
+            titles_before = [n.get("title", "") for n in n0]
+
+            s = requests.post(f"{API}/broadcasts/{bid}/start", headers=_h(formador_s["token"]))
+            assert s.status_code == 200, s.text
+            assert s.json()["status"] == "live"
+
+            # broadcast status
+            g = requests.get(f"{API}/broadcasts/{bid}", headers=_h(formador_s["token"])).json()
+            assert g["status"] == "live"
+
+            # notification arrived
+            import time
+            time.sleep(0.4)
+            n1 = requests.get(f"{API}/notifications", headers=_h(membro_s["token"])).json()
+            found = any("Estamos ao vivo" in (n.get("title", "") + n.get("body", "")) for n in n1)
+            assert found, f"esperava notificação '🔴 Estamos ao vivo!' — recebidas: {[n.get('title') for n in n1[:5]]}"
+
+            # end
+            e = requests.post(f"{API}/broadcasts/{bid}/end", headers=_h(formador_s["token"]))
+            assert e.status_code == 200
+            body = e.json()
+            assert body["status"] == "ended"
+            assert body.get("duration_min") is not None
+            assert isinstance(body["duration_min"], int)
+        finally:
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+
+    def test_token_returns_503_when_livekit_not_configured(self, formador_s, mestre_s):
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC token503", "stages": [3]},
+                          headers=_h(formador_s["token"]))
+        bid = r.json()["id"]
+        try:
+            requests.post(f"{API}/broadcasts/{bid}/start", headers=_h(formador_s["token"]))
+            t = requests.post(f"{API}/broadcasts/{bid}/token", headers=_h(formador_s["token"]))
+            assert t.status_code == 503, t.text
+            data = t.json()
+            # não pode vazar segredo em nenhum lugar da resposta
+            raw = t.text.lower()
+            assert "secret" not in raw and "api_secret" not in raw
+            # mensagem menciona configuração / livekit
+            detail = (data.get("detail") or "").lower()
+            assert ("configur" in detail) or ("livekit" in detail)
+        finally:
+            requests.post(f"{API}/broadcasts/{bid}/end", headers=_h(formador_s["token"]))
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+
+    def test_takeover_only_mestre(self, formador_s, mestre_s, membro_s):
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC takeover", "stages": [3]},
+                          headers=_h(formador_s["token"]))
+        bid = r.json()["id"]
+        try:
+            # membro/formador não têm TAKE_OVER_LIVE
+            assert requests.post(f"{API}/broadcasts/{bid}/takeover", headers=_h(membro_s["token"])).status_code == 403
+            assert requests.post(f"{API}/broadcasts/{bid}/takeover", headers=_h(formador_s["token"])).status_code == 403
+            # mestre pode
+            tk = requests.post(f"{API}/broadcasts/{bid}/takeover", headers=_h(mestre_s["token"]))
+            assert tk.status_code == 200, tk.text
+            g = requests.get(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"])).json()
+            assert g["presenter_id"] == _me(mestre_s["token"])["id"]
+        finally:
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+
+
+class TestBroadcastChatAndModeration:
+    def test_chat_post_get_and_block(self, formador_s, membro_s, mestre_s):
+        _reset_membro_to_stage_3(mestre_s["token"], _me(membro_s["token"])["id"])
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC chat", "stages": [3]},
+                          headers=_h(formador_s["token"]))
+        bid = r.json()["id"]
+        try:
+            requests.post(f"{API}/broadcasts/{bid}/start", headers=_h(formador_s["token"]))
+            # membro posta
+            p = requests.post(f"{API}/broadcasts/{bid}/chat",
+                              json={"text": "olá TESTE_chat"}, headers=_h(membro_s["token"]))
+            assert p.status_code == 200, p.text
+            msg_id = p.json()["id"]
+
+            # GET chat
+            g = requests.get(f"{API}/broadcasts/{bid}/chat", headers=_h(membro_s["token"]))
+            assert g.status_code == 200
+            texts = [m["text"] for m in g.json()["messages"]]
+            assert "olá TESTE_chat" in texts
+
+            # membro NÃO pode moderar (delete requires MODERATE_LIVE)
+            d_forbidden = requests.delete(f"{API}/broadcasts/{bid}/chat/{msg_id}", headers=_h(membro_s["token"]))
+            assert d_forbidden.status_code == 403
+
+            # formador pode moderar
+            d_ok = requests.delete(f"{API}/broadcasts/{bid}/chat/{msg_id}", headers=_h(formador_s["token"]))
+            assert d_ok.status_code == 200
+
+            # membro NÃO pode moderar action=block
+            m_forbidden = requests.post(f"{API}/broadcasts/{bid}/moderate",
+                                        json={"action": "block", "user_id": _me(membro_s["token"])["id"]},
+                                        headers=_h(membro_s["token"]))
+            assert m_forbidden.status_code == 403
+
+            # formador bloqueia membro
+            membro_id = _me(membro_s["token"])["id"]
+            m_ok = requests.post(f"{API}/broadcasts/{bid}/moderate",
+                                 json={"action": "block", "user_id": membro_id},
+                                 headers=_h(formador_s["token"]))
+            assert m_ok.status_code == 200
+
+            # membro bloqueado -> 403 ao postar
+            p2 = requests.post(f"{API}/broadcasts/{bid}/chat",
+                               json={"text": "não devo passar"}, headers=_h(membro_s["token"]))
+            assert p2.status_code == 403
+
+            # unblock para não deixar resíduo
+            requests.post(f"{API}/broadcasts/{bid}/moderate",
+                          json={"action": "unblock", "user_id": membro_id},
+                          headers=_h(formador_s["token"]))
+
+            # toggle_chat desativa
+            tg = requests.post(f"{API}/broadcasts/{bid}/moderate",
+                               json={"action": "toggle_chat"}, headers=_h(formador_s["token"]))
+            assert tg.status_code == 200
+            # com chat desativado, membro recebe 403
+            p3 = requests.post(f"{API}/broadcasts/{bid}/chat",
+                               json={"text": "desativado"}, headers=_h(membro_s["token"]))
+            assert p3.status_code == 403
+        finally:
+            requests.post(f"{API}/broadcasts/{bid}/end", headers=_h(formador_s["token"]))
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+            # garantia extra: desbloquear caso finally acima tenha pulado
+            try:
+                requests.post(f"{API}/broadcasts/{bid}/moderate",
+                              json={"action": "unblock", "user_id": _me(membro_s["token"])["id"]},
+                              headers=_h(formador_s["token"]))
+            except Exception:
+                pass
+
+    def test_prevoc_cannot_post_chat_on_stage3_broadcast(self, formador_s, mestre_s):
+        _ensure_prevoc_stage_1(mestre_s["token"])
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC chat-stage-block", "stages": [3]},
+                          headers=_h(formador_s["token"]))
+        bid = r.json()["id"]
+        try:
+            requests.post(f"{API}/broadcasts/{bid}/start", headers=_h(formador_s["token"]))
+            prevoc = _login(PREVOC)
+            r_get = requests.get(f"{API}/broadcasts/{bid}/chat", headers=_h(prevoc["token"]))
+            assert r_get.status_code == 403
+            r_post = requests.post(f"{API}/broadcasts/{bid}/chat",
+                                   json={"text": "não"}, headers=_h(prevoc["token"]))
+            assert r_post.status_code == 403
+        finally:
+            requests.post(f"{API}/broadcasts/{bid}/end", headers=_h(formador_s["token"]))
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+
+
+class TestBroadcastAnalytics:
+    def test_heartbeat_stats_and_report_permission(self, formador_s, membro_s, mestre_s):
+        _reset_membro_to_stage_3(mestre_s["token"], _me(membro_s["token"])["id"])
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC stats", "stages": [3]},
+                          headers=_h(formador_s["token"]))
+        bid = r.json()["id"]
+        try:
+            requests.post(f"{API}/broadcasts/{bid}/start", headers=_h(formador_s["token"]))
+            hb = requests.post(f"{API}/broadcasts/{bid}/heartbeat", headers=_h(membro_s["token"]))
+            assert hb.status_code == 200
+            data = hb.json()
+            assert "viewers" in data and data["viewers"] >= 1
+            st = requests.get(f"{API}/broadcasts/{bid}/stats", headers=_h(formador_s["token"]))
+            assert st.status_code == 200
+            assert st.json()["viewers"] >= 1
+            # report requer VIEW_LIVE_ANALYTICS -> membro 403
+            rep_forbidden = requests.get(f"{API}/broadcasts/{bid}/report", headers=_h(membro_s["token"]))
+            assert rep_forbidden.status_code == 403
+            # mestre tem tudo
+            rep_ok = requests.get(f"{API}/broadcasts/{bid}/report", headers=_h(mestre_s["token"]))
+            assert rep_ok.status_code == 200
+            rep = rep_ok.json()
+            assert rep["title"] == "TEST_BC stats"
+            assert "unique_viewers" in rep and rep["unique_viewers"] >= 1
+        finally:
+            requests.post(f"{API}/broadcasts/{bid}/end", headers=_h(formador_s["token"]))
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))
+
+
+class TestBroadcastStageInvariant:
+    """Nenhum endpoint de broadcast deve alterar user.current_stage_order."""
+    def test_start_end_takeover_do_not_change_stage(self, formador_s, membro_s, mestre_s):
+        membro_id = _me(membro_s["token"])["id"]
+        _reset_membro_to_stage_3(mestre_s["token"], membro_id)
+        stage_before = requests.get(f"{API}/master/users/{membro_id}",
+                                    headers=_h(mestre_s["token"])).json()["current_stage_order"]
+        r = requests.post(f"{API}/broadcasts",
+                          json={"title": "TEST_BC invariant", "stages": [3]},
+                          headers=_h(formador_s["token"]))
+        bid = r.json()["id"]
+        try:
+            requests.post(f"{API}/broadcasts/{bid}/start", headers=_h(formador_s["token"]))
+            requests.post(f"{API}/broadcasts/{bid}/heartbeat", headers=_h(membro_s["token"]))
+            requests.post(f"{API}/broadcasts/{bid}/chat",
+                          json={"text": "TEST inv"}, headers=_h(membro_s["token"]))
+            requests.post(f"{API}/broadcasts/{bid}/takeover", headers=_h(mestre_s["token"]))
+            requests.post(f"{API}/broadcasts/{bid}/end", headers=_h(formador_s["token"]))
+            stage_after = requests.get(f"{API}/master/users/{membro_id}",
+                                       headers=_h(mestre_s["token"])).json()["current_stage_order"]
+            assert stage_after == stage_before
+        finally:
+            requests.delete(f"{API}/broadcasts/{bid}", headers=_h(mestre_s["token"]))

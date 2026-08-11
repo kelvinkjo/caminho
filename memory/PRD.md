@@ -17,6 +17,15 @@ Prioridades absolutas do projeto: **1) segurança das etapas, 2) acompanhamento 
 ## Etapas (enum, ordem 1→6)
 PRE_VOCACIONADO → VOCACIONADO → DISCIPULO_ANO_1 → DISCIPULO_ANO_2 → COMPROMISSADO → CONSAGRADO. Cada uma com tema, pergunta, ícone, descrição.
 
+## Implementado (2026-06 — iteração 8) 🔴 Central de Transmissão ao Vivo (LiveKit WebRTC) — FASE 1
+- **Integração LiveKit** (WebRTC SFU): captura via APIs oficiais do navegador (`getUserMedia`); tokens JWT curtos (15 min) gerados **só no backend**, papel (broadcaster/viewer) derivado no servidor. Segredos só em `backend/.env` (`LIVEKIT_URL/API_KEY/API_SECRET`). ⚠️ **Credenciais ainda não fornecidas** pelo usuário → `/api/livekit/status` = `configured:false` e `/broadcasts/{id}/token` responde **503 controlado**; app continua funcionando (câmera/preview/checklist/chat operam).
+- **Permissões novas** (só Mestre concede): MANAGE_LIVE, MANAGE_CAMERA, MANAGE_MICROPHONE, MANAGE_SCENES, MANAGE_SOURCES, VIEW_LIVE_ANALYTICS, TAKE_OVER_LIVE (+ CREATE/EDIT/START/END/MODERATE_LIVE já existentes).
+- **Endpoints** (`db.broadcasts`): CRUD `/api/broadcasts`, `/start` (muda status→live **+ aviso automático** aos membros da etapa), `/end` (duration_min), `/takeover` (só TAKE_OVER_LIVE/Mestre → "Transmissão assumida"), `/token` (LiveKit), `/heartbeat` + `/stats` (espectadores/pico), chat `/chat` (GET/POST/DELETE/highlight) + `/moderate` (mute/block/toggle_chat, exige MODERATE_LIVE), `/report` (VIEW_LIVE_ANALYTICS), `/livekit/status`.
+- **Acesso por ETAPA OFICIAL** (`broadcast_accessible`, nunca por progresso). Invariante verificado: nenhum endpoint de transmissão altera `current_stage_order`.
+- **UI**: `/app/transmissoes` (Central — criar/listar), `/app/estudio/:id` (estúdio broadcaster: permissão câmera/mic, seleção de dispositivos, medidor de áudio + clipping, preview, checklist, modo Simples/Profissional, iniciar/encerrar com confirmação, takeover, stats ao vivo, chat+moderação), `/app/ao-vivo/:id` (espectador: player + chat + contagem + fullscreen). Link no Perfil. `data-testid` em todos os elementos.
+- **Faseamento**: Fase 2 (cenas/fontes/layouts/lower-third/banner/temas/screen-share/presets/agenda) e Fase 3 (multiapresentador/convidados/sala de espera) — PENDENTES.
+- Testado: 14/14 novos testes backend + 16/16 checkpoints UI (100%). LiveKit intencionalmente não configurado nesta fase (token=503 correto). Streaming de vídeo real depende das credenciais do LiveKit.
+
 ## Implementado (2026-06 — iteração 7) ✅ Central de Mídia Externa (embed oficial)
 - **Modo embed-only** (opção escolhida pelo usuário): armazena **apenas** URL/provider/external_id/metadados. NUNCA baixa, copia ou faz scraping de vídeo.
 - **Adaptadores** (`MediaProvider` base + `YouTubeProvider` + `VimeoProvider`) — arquitetura pronta para novos provedores/APIs oficiais no futuro. Detecção/normalização de URL: YouTube `watch?v=`, `youtu.be/`, `live/`, `embed/`, `shorts/`; Vimeo `vimeo.com/ID` e `player.vimeo.com/video/ID`.

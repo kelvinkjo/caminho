@@ -860,6 +860,8 @@ ALL_PERMISSIONS = [
     "CREATE_ANNOUNCEMENT", "EDIT_ANNOUNCEMENT", "DELETE_ANNOUNCEMENT", "PUBLISH_ANNOUNCEMENT",
     "CREATE_LIVE", "EDIT_LIVE", "START_LIVE", "END_LIVE", "MODERATE_LIVE",
     "VIEW_ANALYTICS", "MANAGE_CONTENT_ACCESS", "EDIT_ALL_CONTENT", "MANAGE_EXTERNAL_MEDIA",
+    "MANAGE_LIVE", "MANAGE_CAMERA", "MANAGE_MICROPHONE", "MANAGE_SCENES", "MANAGE_SOURCES",
+    "VIEW_LIVE_ANALYTICS", "TAKE_OVER_LIVE",
 ]
 
 def has_perm(user: dict, perm: str) -> bool:
@@ -1423,6 +1425,339 @@ async def toggle_media_favorite(mid: str, user: dict = Depends(get_current_user)
     await db.media_favorites.insert_one({"id": str(uuid.uuid4()), "user_id": user["id"], "media_id": mid, "at": now_iso()})
     return {"ok": True, "favorited": True}
 
+# ================= CENTRAL DE TRANSMISSÃO AO VIVO (LiveKit WebRTC) =================
+# Captura via APIs oficiais do navegador (getUserMedia/getDisplayMedia) no frontend.
+# Streaming via LiveKit SFU. Tokens curtos gerados SÓ no backend. Segredos nunca no frontend.
+try:
+    from livekit import api as lk_api
+    _LK_OK = True
+except Exception:
+    _LK_OK = False
+
+LIVEKIT_URL = os.environ.get("LIVEKIT_URL", "")
+LIVEKIT_API_KEY = os.environ.get("LIVEKIT_API_KEY", "")
+LIVEKIT_API_SECRET = os.environ.get("LIVEKIT_API_SECRET", "")
+
+def livekit_configured() -> bool:
+    return bool(_LK_OK and LIVEKIT_URL and LIVEKIT_API_KEY and LIVEKIT_API_SECRET)
+
+def lk_client():
+    return lk_api.LiveKitAPI(url=LIVEKIT_URL, api_key=LIVEKIT_API_KEY, api_secret=LIVEKIT_API_SECRET)
+
+def broadcast_accessible(user: dict, b: dict) -> bool:
+    if user["role"] in ("mestre", "formador", "admin"):
+        return True
+    st = b.get("stages") or []
+    return (not st) or (user["current_stage_order"] in st)
+
+def can_operate_broadcast(user: dict, b: dict) -> bool:
+    # dono, apresentador atual, ou EDIT_ALL_CONTENT/mestre
+    return (user["role"] == "mestre" or b.get("owner_id") == user["id"]
+            or b.get("presenter_id") == user["id"] or has_perm(user, "EDIT_ALL_CONTENT"))
+
+class BroadcastIn(BaseModel):
+    title: str
+    description: str = ""
+    stages: List[int] = []
+    scheduled_at: str = ""
+    preset: str = ""
+    mode: str = "simple"   # "simple" | "pro"
+
+class BroadcastPatch(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    stages: Optional[List[int]] = None
+    scheduled_at: Optional[str] = None
+    preset: Optional[str] = None
+    mode: Optional[str] = None
+
+class ChatMsgIn(BaseModel):
+    text: str
+
+def broadcast_public(b: dict) -> dict:
+    b = dict(b)
+    b.pop("_id", None)
+    return b
+
+@api.get("/broadcasts")
+async def list_broadcasts(user: dict = Depends(get_current_user)):
+    staff = user["role"] in ("mestre", "formador", "admin")
+    items = await db.broadcasts.find().sort("created_at", -1).to_list(300)
+    out = []
+    for b in items:
+        if not broadcast_accessible(user, b):
+            continue
+        if not staff and b.get("status") not in ("live", "scheduled"):
+            continue
+        out.append(broadcast_public(b))
+    return out
+
+@api.post("/broadcasts")
+async def create_broadcast(body: BroadcastIn, user: dict = Depends(require_perm("CREATE_LIVE"))):
+    bid = str(uuid.uuid4())
+    doc = {
+        "id": bid, "title": body.title, "description": body.description,
+        "stages": body.stages, "scheduled_at": body.scheduled_at, "preset": body.preset,
+        "mode": body.mode if body.mode in ("simple", "pro") else "simple",
+        "status": "idle", "room_name": f"caminho-{bid[:8]}",
+        "owner_id": user["id"], "owner_name": user["name"],
+        "presenter_id": user["id"], "presenter_name": user["name"],
+        "chat_enabled": True, "created_at": now_iso(),
+        "started_at": None, "ended_at": None,
+        "viewers_peak": 0, "duration_min": None,
+    }
+    await db.broadcasts.insert_one(doc)
+    await audit("create_broadcast", user, broadcast_id=bid)
+    return broadcast_public(doc)
+
+@api.get("/broadcasts/{bid}")
+async def get_broadcast(bid: str, user: dict = Depends(get_current_user)):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    if not broadcast_accessible(user, b):
+        raise HTTPException(403, "Esta transmissão não está liberada para a sua etapa atual.")
+    return broadcast_public(b)
+
+@api.patch("/broadcasts/{bid}")
+async def edit_broadcast(bid: str, body: BroadcastPatch, user: dict = Depends(require_perm("EDIT_LIVE"))):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    if not can_operate_broadcast(user, b):
+        raise HTTPException(403, "Você só pode editar suas próprias transmissões.")
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if updates:
+        await db.broadcasts.update_one({"id": bid}, {"$set": updates})
+        await audit("edit_broadcast", user, broadcast_id=bid)
+    return {"ok": True}
+
+@api.delete("/broadcasts/{bid}")
+async def delete_broadcast(bid: str, user: dict = Depends(require_perm("MANAGE_LIVE"))):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    if not can_operate_broadcast(user, b):
+        raise HTTPException(403, "Você só pode remover suas próprias transmissões.")
+    await db.broadcasts.delete_one({"id": bid})
+    await audit("delete_broadcast", user, broadcast_id=bid)
+    return {"ok": True}
+
+@api.post("/broadcasts/{bid}/start")
+async def start_broadcast(bid: str, user: dict = Depends(require_perm("START_LIVE"))):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    if not can_operate_broadcast(user, b):
+        raise HTTPException(403, "Você não é responsável por esta transmissão.")
+    if livekit_configured():
+        try:
+            async with lk_client() as lk:
+                await lk.room.create_room(lk_api.CreateRoomRequest(name=b["room_name"], empty_timeout=600, max_participants=1000))
+        except Exception as e:
+            logging.warning(f"LiveKit create_room: {e}")
+    await db.broadcasts.update_one({"id": bid}, {"$set": {"status": "live", "started_at": now_iso()}})
+    await audit("start_broadcast", user, broadcast_id=bid)
+    # AVISO AUTOMÁTICO: notifica membros da(s) etapa(s) autorizada(s)
+    stages = b.get("stages") or []
+    q = {"role": "membro"} if not stages else {"role": "membro", "current_stage_order": {"$in": stages}}
+    async for m in db.users.find(q):
+        await notify(m["id"], "🔴 Estamos ao vivo!", f"A transmissão '{b['title']}' começou. Entre agora.")
+    return {"ok": True, "status": "live"}
+
+@api.post("/broadcasts/{bid}/end")
+async def end_broadcast(bid: str, user: dict = Depends(require_perm("END_LIVE"))):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    if not can_operate_broadcast(user, b):
+        raise HTTPException(403, "Você não é responsável por esta transmissão.")
+    dur = None
+    if b.get("started_at"):
+        try:
+            dur = int((datetime.now(timezone.utc) - datetime.fromisoformat(b["started_at"])).total_seconds() // 60)
+        except Exception:
+            dur = None
+    if livekit_configured():
+        try:
+            async with lk_client() as lk:
+                await lk.room.delete_room(lk_api.DeleteRoomRequest(room=b["room_name"]))
+        except Exception as e:
+            logging.warning(f"LiveKit delete_room: {e}")
+    await db.broadcasts.update_one({"id": bid}, {"$set": {"status": "ended", "ended_at": now_iso(), "duration_min": dur}})
+    await audit("end_broadcast", user, broadcast_id=bid, duration_min=dur)
+    return {"ok": True, "status": "ended", "duration_min": dur}
+
+@api.post("/broadcasts/{bid}/takeover")
+async def takeover_broadcast(bid: str, user: dict = Depends(require_perm("TAKE_OVER_LIVE"))):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    await db.broadcasts.update_one({"id": bid}, {"$set": {"presenter_id": user["id"], "presenter_name": user["name"]}})
+    await audit("takeover_broadcast", user, broadcast_id=bid, note="Transmissão assumida pelo Login Mestre.")
+    if b.get("owner_id"):
+        await notify(b["owner_id"], "Transmissão assumida", f"O Login Mestre assumiu a transmissão '{b['title']}'.")
+    return {"ok": True, "presenter_name": user["name"]}
+
+@api.post("/broadcasts/{bid}/token")
+async def broadcast_token(bid: str, user: dict = Depends(get_current_user)):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    if not livekit_configured():
+        raise HTTPException(503, "Serviço de transmissão não configurado. Informe as credenciais do LiveKit ao Login Mestre.")
+    # papel derivado no backend (nunca confiar no cliente)
+    is_operator = can_operate_broadcast(user, b) and has_perm(user, "START_LIVE")
+    if not is_operator:
+        if not broadcast_accessible(user, b):
+            raise HTTPException(403, "Esta transmissão não está liberada para a sua etapa.")
+        if b.get("status") != "live":
+            raise HTTPException(403, "A transmissão ainda não está ao vivo.")
+        if await db.broadcast_bans.find_one({"broadcast_id": bid, "user_id": user["id"]}):
+            raise HTTPException(403, "Você foi bloqueado desta transmissão.")
+    grants = lk_api.VideoGrants(
+        room_join=True, room=b["room_name"], can_subscribe=True,
+        can_publish=is_operator, can_publish_data=is_operator,
+    )
+    token = (lk_api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+             .with_ttl(timedelta(minutes=15))
+             .with_identity(user["id"]).with_name(user["name"])
+             .with_grants(grants).to_jwt())
+    return {"token": token, "server_url": LIVEKIT_URL, "room": b["room_name"],
+            "role": "broadcaster" if is_operator else "viewer"}
+
+# --- presença/espectadores (heartbeat) ---
+@api.post("/broadcasts/{bid}/heartbeat")
+async def broadcast_heartbeat(bid: str, user: dict = Depends(get_current_user)):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    await db.broadcast_presence.update_one(
+        {"broadcast_id": bid, "user_id": user["id"]},
+        {"$set": {"at": now_iso(), "name": user["name"]}, "$setOnInsert": {"id": str(uuid.uuid4())}}, upsert=True)
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=20)).isoformat()
+    count = await db.broadcast_presence.count_documents({"broadcast_id": bid, "at": {"$gt": cutoff}})
+    if count > (b.get("viewers_peak") or 0):
+        await db.broadcasts.update_one({"id": bid}, {"$set": {"viewers_peak": count}})
+    return {"viewers": count, "viewers_peak": max(count, b.get("viewers_peak") or 0)}
+
+@api.get("/broadcasts/{bid}/stats")
+async def broadcast_stats(bid: str, user: dict = Depends(get_current_user)):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=20)).isoformat()
+    count = await db.broadcast_presence.count_documents({"broadcast_id": bid, "at": {"$gt": cutoff}})
+    return {"viewers": count, "viewers_peak": b.get("viewers_peak") or 0,
+            "status": b.get("status"), "started_at": b.get("started_at"),
+            "duration_min": b.get("duration_min"), "presenter_name": b.get("presenter_name")}
+
+# --- chat + moderação ---
+@api.get("/broadcasts/{bid}/chat")
+async def get_chat(bid: str, since: Optional[str] = None, user: dict = Depends(get_current_user)):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    if not broadcast_accessible(user, b):
+        raise HTTPException(403, "Sem acesso a esta transmissão.")
+    q = {"broadcast_id": bid, "deleted": {"$ne": True}}
+    if since:
+        q["at"] = {"$gt": since}
+    msgs = await db.broadcast_chat.find(q).sort("at", 1).to_list(200)
+    for m in msgs:
+        m.pop("_id", None)
+    return {"messages": msgs, "chat_enabled": b.get("chat_enabled", True)}
+
+@api.post("/broadcasts/{bid}/chat")
+async def post_chat(bid: str, body: ChatMsgIn, user: dict = Depends(get_current_user)):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    if not broadcast_accessible(user, b):
+        raise HTTPException(403, "Sem acesso a esta transmissão.")
+    if not b.get("chat_enabled", True):
+        raise HTTPException(403, "O chat está desativado.")
+    if await db.broadcast_bans.find_one({"broadcast_id": bid, "user_id": user["id"]}):
+        raise HTTPException(403, "Você foi bloqueado do chat.")
+    if await db.broadcast_mutes.find_one({"broadcast_id": bid, "user_id": user["id"]}):
+        raise HTTPException(403, "Você está silenciado neste chat.")
+    text = (body.text or "").strip()[:500]
+    if not text:
+        raise HTTPException(400, "Mensagem vazia.")
+    doc = {"id": str(uuid.uuid4()), "broadcast_id": bid, "user_id": user["id"], "name": user["name"],
+           "text": text, "at": now_iso(), "highlighted": False, "deleted": False}
+    await db.broadcast_chat.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api.delete("/broadcasts/{bid}/chat/{msg_id}")
+async def delete_chat(bid: str, msg_id: str, user: dict = Depends(require_perm("MODERATE_LIVE"))):
+    await db.broadcast_chat.update_one({"id": msg_id, "broadcast_id": bid}, {"$set": {"deleted": True}})
+    await audit("chat_delete", user, broadcast_id=bid, msg_id=msg_id)
+    return {"ok": True}
+
+@api.post("/broadcasts/{bid}/chat/{msg_id}/highlight")
+async def highlight_chat(bid: str, msg_id: str, user: dict = Depends(require_perm("MODERATE_LIVE"))):
+    m = await db.broadcast_chat.find_one({"id": msg_id, "broadcast_id": bid})
+    if not m:
+        raise HTTPException(404, "Mensagem não encontrada")
+    await db.broadcast_chat.update_one({"id": msg_id}, {"$set": {"highlighted": not m.get("highlighted", False)}})
+    return {"ok": True, "highlighted": not m.get("highlighted", False)}
+
+@api.post("/broadcasts/{bid}/moderate")
+async def moderate_broadcast(bid: str, body: dict, user: dict = Depends(require_perm("MODERATE_LIVE"))):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    action = body.get("action")
+    target = body.get("user_id")
+    if action == "toggle_chat":
+        await db.broadcasts.update_one({"id": bid}, {"$set": {"chat_enabled": not b.get("chat_enabled", True)}})
+        await audit("chat_toggle", user, broadcast_id=bid)
+        return {"ok": True, "chat_enabled": not b.get("chat_enabled", True)}
+    if not target:
+        raise HTTPException(400, "user_id obrigatório.")
+    if action == "mute":
+        await db.broadcast_mutes.update_one({"broadcast_id": bid, "user_id": target},
+            {"$set": {"broadcast_id": bid, "user_id": target}}, upsert=True)
+    elif action == "unmute":
+        await db.broadcast_mutes.delete_one({"broadcast_id": bid, "user_id": target})
+    elif action == "block":
+        await db.broadcast_bans.update_one({"broadcast_id": bid, "user_id": target},
+            {"$set": {"broadcast_id": bid, "user_id": target}}, upsert=True)
+        if livekit_configured():
+            try:
+                async with lk_client() as lk:
+                    await lk.room.remove_participant(lk_api.RoomParticipantIdentity(room=b["room_name"], identity=target))
+            except Exception as e:
+                logging.warning(f"LiveKit remove_participant: {e}")
+    elif action == "unblock":
+        await db.broadcast_bans.delete_one({"broadcast_id": bid, "user_id": target})
+    else:
+        raise HTTPException(400, "Ação inválida.")
+    await audit(f"moderate_{action}", user, broadcast_id=bid, target=target)
+    return {"ok": True}
+
+@api.get("/broadcasts/{bid}/report")
+async def broadcast_report(bid: str, user: dict = Depends(require_perm("VIEW_LIVE_ANALYTICS"))):
+    b = await db.broadcasts.find_one({"id": bid})
+    if not b:
+        raise HTTPException(404, "Transmissão não encontrada")
+    total_msgs = await db.broadcast_chat.count_documents({"broadcast_id": bid})
+    blocked = await db.broadcast_bans.count_documents({"broadcast_id": bid})
+    unique_viewers = len(await db.broadcast_presence.distinct("user_id", {"broadcast_id": bid}))
+    logs = await db.audit_logs.find({"broadcast_id": bid}).sort("at", 1).to_list(300)
+    for l in logs:
+        l.pop("_id", None)
+    return {"title": b["title"], "duration_min": b.get("duration_min"),
+            "viewers_peak": b.get("viewers_peak") or 0, "unique_viewers": unique_viewers,
+            "messages": total_msgs, "blocked_users": blocked,
+            "started_at": b.get("started_at"), "ended_at": b.get("ended_at"), "logs": logs}
+
+@api.get("/livekit/status")
+async def livekit_status(user: dict = Depends(get_current_user)):
+    return {"configured": livekit_configured()}
+
 
 # ---------------- seed ----------------
 STAGES = [
@@ -1636,12 +1971,16 @@ async def seed():
     demo_former_perms = ["CREATE_COURSE", "EDIT_COURSE", "CREATE_MODULE", "CREATE_LESSON", "EDIT_LESSON",
                          "PUBLISH_LESSON", "UPLOAD_VIDEO", "UPLOAD_AUDIO", "UPLOAD_DOCUMENT",
                          "CREATE_ANNOUNCEMENT", "DELETE_ANNOUNCEMENT", "CREATE_LIVE", "EDIT_LIVE",
-                         "START_LIVE", "END_LIVE", "MODERATE_LIVE", "VIEW_ANALYTICS", "MANAGE_EXTERNAL_MEDIA"]
+                         "START_LIVE", "END_LIVE", "MODERATE_LIVE", "VIEW_ANALYTICS", "MANAGE_EXTERNAL_MEDIA",
+                         "MANAGE_LIVE", "MANAGE_CAMERA", "MANAGE_MICROPHONE", "MANAGE_SCENES",
+                         "MANAGE_SOURCES", "VIEW_LIVE_ANALYTICS"]
     fdoc = await db.users.find_one({"email": "formador@caminho.app"})
     if fdoc and not fdoc.get("permissions"):
         await db.users.update_one({"id": fdoc["id"]}, {"$set": {"permissions": demo_former_perms}})
-    elif fdoc and "MANAGE_EXTERNAL_MEDIA" not in (fdoc.get("permissions") or []):
-        await db.users.update_one({"id": fdoc["id"]}, {"$addToSet": {"permissions": "MANAGE_EXTERNAL_MEDIA"}})
+    else:
+        missing = [p for p in demo_former_perms if p not in (fdoc.get("permissions") or [])] if fdoc else []
+        if missing:
+            await db.users.update_one({"id": fdoc["id"]}, {"$addToSet": {"permissions": {"$each": missing}}})
 
     # demo formador
     former = await db.users.find_one({"email": "formador@caminho.app"})

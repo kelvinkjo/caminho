@@ -28,6 +28,9 @@ import FormerPanel from "@/pages/FormerPanel";
 import MediaCenter from "@/pages/MediaCenter";
 import MediaWatch from "@/pages/MediaWatch";
 import MediaManage from "@/pages/MediaManage";
+import BroadcastCenter from "@/pages/BroadcastCenter";
+import Studio from "@/pages/Studio";
+import BroadcastViewer from "@/pages/BroadcastViewer";
 
 function Splash() {
   return <div className="min-h-screen bg-stone-950 flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-orange-600" /></div>;
@@ -71,6 +74,9 @@ function App() {
           <Route path="/app/midia" element={<Protected><MediaCenter /></Protected>} />
           <Route path="/app/midia/gerenciar" element={<Protected roles={["formador", "mestre"]}><MediaManage /></Protected>} />
           <Route path="/app/midia/:id" element={<Protected><MediaWatch /></Protected>} />
+          <Route path="/app/transmissoes" element={<Protected><BroadcastCenter /></Protected>} />
+          <Route path="/app/estudio/:id" element={<Protected roles={["formador", "mestre"]}><Studio /></Protected>} />
+          <Route path="/app/ao-vivo/:id" element={<Protected><BroadcastViewer /></Protected>} />
           <Route path="/app/pessoas" element={<Protected roles={["formador", "admin", "mestre"]}><MyPeople /></Protected>} />
           <Route path="/app/perfil" element={<Protected><Profile /></Protected>} />
           <Route path="/app/mestre" element={<Protected roles={["mestre"]}><MasterControl /></Protected>} />
