@@ -76,10 +76,16 @@ async def get_current_user(request: Request) -> dict:
 
 def require_roles(*roles):
     async def dep(user: dict = Depends(get_current_user)):
-        if user["role"] not in roles:
+        if user["role"] != "mestre" and user["role"] not in roles:
             raise HTTPException(403, "Acesso não autorizado")
         return user
     return dep
+
+async def require_master(user: dict = Depends(get_current_user)) -> dict:
+    # Permissão MANAGE_FORMATION_STAGE — exclusiva do Login Mestre
+    if user["role"] != "mestre":
+        raise HTTPException(403, "Apenas o Login Mestre pode gerenciar etapas de formação.")
+    return user
 
 # ---------------- models ----------------
 class RegisterIn(BaseModel):
@@ -100,7 +106,6 @@ class FollowupIn(BaseModel):
 
 class AdminUserPatch(BaseModel):
     role: Optional[str] = None
-    current_stage_order: Optional[int] = None
     formador_id: Optional[str] = None
     blocked: Optional[bool] = None
 
@@ -191,7 +196,7 @@ async def get_stages(user: dict = Depends(get_current_user)):
 
 @api.get("/stages/{order}/modules")
 async def get_modules(order: int, user: dict = Depends(get_current_user)):
-    if user["role"] not in ("admin", "formador") and order > user["current_stage_order"]:
+    if user["role"] not in ("admin", "formador", "mestre") and order > user["current_stage_order"]:
         raise HTTPException(403, "Etapa bloqueada")
     modules = await db.modules.find({"stage_order": order}).sort("order", 1).to_list(200)
     prog_docs = await db.lesson_progress.find({"user_id": user["id"]}).to_list(2000)
@@ -219,7 +224,7 @@ async def get_lesson(lesson_id: str, user: dict = Depends(get_current_user)):
     l = await db.lessons.find_one({"id": lesson_id})
     if not l:
         raise HTTPException(404, "Aula não encontrada")
-    if user["role"] not in ("admin", "formador") and l["stage_order"] > user["current_stage_order"]:
+    if user["role"] not in ("admin", "formador", "mestre") and l["stage_order"] > user["current_stage_order"]:
         raise HTTPException(403, "Etapa bloqueada")
     l.pop("_id", None)
     p = await db.lesson_progress.find_one({"user_id": user["id"], "lesson_id": lesson_id})
@@ -232,7 +237,7 @@ async def set_progress(lesson_id: str, body: ProgressIn, user: dict = Depends(ge
     l = await db.lessons.find_one({"id": lesson_id})
     if not l:
         raise HTTPException(404, "Aula não encontrada")
-    if user["role"] not in ("admin", "formador") and l["stage_order"] > user["current_stage_order"]:
+    if user["role"] not in ("admin", "formador", "mestre") and l["stage_order"] > user["current_stage_order"]:
         raise HTTPException(403, "Etapa bloqueada")
     await db.lesson_progress.update_one(
         {"user_id": user["id"], "lesson_id": lesson_id},
@@ -242,60 +247,55 @@ async def set_progress(lesson_id: str, body: ProgressIn, user: dict = Depends(ge
         upsert=True)
     return {"ok": True, "progress": await stage_progress(user["id"], l["stage_order"])}
 
-# ---------------- approval flow ----------------
-@api.post("/stages/request-approval")
-async def request_approval(user: dict = Depends(get_current_user)):
-    order = user["current_stage_order"]
-    prog = await stage_progress(user["id"], order)
-    if prog["percent"] < 100:
-        raise HTTPException(400, "Conclua todas as aulas da etapa antes de solicitar avaliação.")
-    if await mandatory_lives_pending(user["id"], order):
-        raise HTTPException(400, "Confirme presença nas lives obrigatórias da etapa antes de solicitar avaliação.")
-    if order >= 6:
-        raise HTTPException(400, "Você já está na etapa final.")
-    existing = await db.approvals.find_one({"user_id": user["id"], "stage_order": order, "status": "pending"})
-    if existing:
-        return {"ok": True, "status": "pending"}
-    doc = {"id": str(uuid.uuid4()), "user_id": user["id"], "user_name": user["name"],
-           "stage_order": order, "formador_id": user.get("formador_id"),
-           "status": "pending", "created_at": now_iso(), "note": ""}
-    await db.approvals.insert_one(doc)
-    await db.audit_logs.insert_one({"id": str(uuid.uuid4()), "action": "request_approval",
-                                    "user_id": user["id"], "stage_order": order, "at": now_iso()})
-    return {"ok": True, "status": "pending"}
+# ---------------- formation status + recomendação (NUNCA altera etapa) ----------------
+# REGRA INVIOLÁVEL: concluir a formação NÃO muda a etapa. Etapa só muda pelo Login Mestre.
+async def formation_status(user_id: str, order: int):
+    prog = await stage_progress(user_id, order)
+    lives_pending = await mandatory_lives_pending(user_id, order)
+    concluded = prog["percent"] >= 100 and not lives_pending
+    return {"percent": prog["percent"], "completed_lessons": prog["completed"],
+            "total_lessons": prog["total"], "mandatory_lives_ok": not lives_pending, "concluded": concluded}
 
-@api.get("/approvals")
-async def list_approvals(user: dict = Depends(require_roles("admin", "formador"))):
-    q = {"status": "pending"}
-    if user["role"] == "formador":
-        q["formador_id"] = user["id"]
-    items = await db.approvals.find(q).sort("created_at", 1).to_list(500)
+@api.get("/formation/status")
+async def my_formation_status(user: dict = Depends(get_current_user)):
+    order = user["current_stage_order"]
+    fs = await formation_status(user["id"], order)
+    fs["next_step"] = ("Você concluiu os requisitos formativos desta etapa. A continuidade da sua caminhada será definida pela liderança responsável."
+                       if fs["concluded"] else "Continue sua formação nesta etapa, no seu ritmo.")
+    return fs
+
+class RecommendIn(BaseModel):
+    user_id: str
+    recommended_stage_order: int
+    justification: str
+
+@api.post("/formador/recommend")
+async def formador_recommend(body: RecommendIn, user: dict = Depends(require_roles("formador"))):
+    if not body.justification.strip():
+        raise HTTPException(400, "A justificativa é obrigatória.")
+    if not (1 <= body.recommended_stage_order <= 6):
+        raise HTTPException(400, "Etapa inválida.")
+    target = await db.users.find_one({"id": body.user_id})
+    if not target:
+        raise HTTPException(404, "Usuário não encontrado")
+    if user["role"] == "formador" and target.get("formador_id") != user["id"]:
+        raise HTTPException(403, "Você só pode recomendar para pessoas que acompanha.")
+    doc = {"id": str(uuid.uuid4()), "user_id": target["id"], "user_name": target["name"],
+           "formador_id": user["id"], "formador_name": user["name"],
+           "current_stage_order": target["current_stage_order"],
+           "recommended_stage_order": body.recommended_stage_order,
+           "justification": body.justification.strip(), "status": "pending",
+           "created_at": now_iso(), "resolved_at": None, "resolved_by": None}
+    await db.stage_recommendations.insert_one(doc)
+    doc.pop("_id", None)
+    return {"ok": True, "recommendation": doc}
+
+@api.get("/formador/recommendations")
+async def formador_recommendations(user: dict = Depends(require_roles("formador"))):
+    items = await db.stage_recommendations.find({"formador_id": user["id"]}).sort("created_at", -1).to_list(500)
     for i in items:
         i.pop("_id", None)
     return items
-
-@api.post("/approvals/{approval_id}/approve")
-async def approve(approval_id: str, user: dict = Depends(require_roles("admin", "formador"))):
-    a = await db.approvals.find_one({"id": approval_id})
-    if not a or a["status"] != "pending":
-        raise HTTPException(404, "Solicitação não encontrada")
-    target = await db.users.find_one({"id": a["user_id"]})
-    new_order = min(a["stage_order"] + 1, 6)
-    await db.users.update_one({"id": a["user_id"]}, {"$set": {"current_stage_order": new_order}})
-    await db.approvals.update_one({"id": approval_id}, {"$set": {"status": "approved", "resolved_at": now_iso(), "resolved_by": user["id"]}})
-    await db.audit_logs.insert_one({"id": str(uuid.uuid4()), "action": "approve_stage", "by": user["id"],
-                                    "user_id": a["user_id"], "from_stage": a["stage_order"], "to_stage": new_order, "at": now_iso()})
-    return {"ok": True}
-
-@api.post("/approvals/{approval_id}/followup")
-async def request_followup(approval_id: str, body: FollowupIn, user: dict = Depends(require_roles("admin", "formador"))):
-    a = await db.approvals.find_one({"id": approval_id})
-    if not a or a["status"] != "pending":
-        raise HTTPException(404, "Solicitação não encontrada")
-    await db.approvals.update_one({"id": approval_id}, {"$set": {"status": "followup", "note": body.note, "resolved_at": now_iso(), "resolved_by": user["id"]}})
-    await db.pastoral_followups.insert_one({"id": str(uuid.uuid4()), "user_id": a["user_id"], "formador_id": user["id"],
-                                            "note": body.note, "at": now_iso()})
-    return {"ok": True}
 
 # ---------------- formador people + radar ----------------
 def radar_status(last_active: str):
@@ -312,21 +312,23 @@ def radar_status(last_active: str):
 
 @api.get("/formador/people")
 async def my_people(user: dict = Depends(require_roles("admin", "formador"))):
-    q = {} if user["role"] == "admin" else {"formador_id": user["id"]}
+    q = {} if user["role"] in ("admin", "mestre") else {"formador_id": user["id"]}
     q["role"] = "membro"
     people = await db.users.find(q).to_list(1000)
     stages = {s["order"]: s async for s in db.stages.find()}
     out = []
     for p in people:
         prog = await stage_progress(p["id"], p["current_stage_order"])
+        fs = await formation_status(p["id"], p["current_stage_order"])
         st = stages.get(p["current_stage_order"], {})
-        pending = await db.approvals.find_one({"user_id": p["id"], "status": "pending"})
+        rec = await db.stage_recommendations.find_one({"user_id": p["id"], "status": "pending"})
         out.append({
             "id": p["id"], "name": p["name"], "email": p["email"],
             "current_stage_order": p["current_stage_order"],
             "stage_name": st.get("name", ""), "progress": prog,
+            "formation_concluded": fs["concluded"],
+            "recommendation_pending": bool(rec),
             "last_active": p.get("last_active"), "radar": radar_status(p.get("last_active", "")),
-            "awaiting_approval": bool(pending),
         })
     order = {"red": 0, "yellow": 1, "green": 2}
     out.sort(key=lambda x: order.get(x["radar"], 3))
@@ -391,10 +393,15 @@ async def dashboard(user: dict = Depends(get_current_user)):
     live = await db.lives.find_one({"status": "upcoming"}, sort=[("date", 1)])
     if live:
         live.pop("_id", None)
+    fstatus = await formation_status(user["id"], user["current_stage_order"])
+    notifs = await db.notifications.find({"user_id": user["id"], "read": False}).sort("at", -1).to_list(10)
+    for n in notifs:
+        n.pop("_id", None)
     return {
         "user": public_user(user), "stage": stage, "progress": prog,
         "continue_lesson": continue_lesson, "word": word,
         "missions": missions, "events": events, "next_live": live,
+        "formation": fstatus, "notifications": notifs,
     }
 
 # ---------------- admin ----------------
@@ -406,7 +413,7 @@ async def admin_stats(user: dict = Depends(require_roles("admin"))):
     for s in stages:
         c = await db.users.count_documents({"current_stage_order": s["order"], "role": "membro"})
         by_stage.append({"stage": s["name"], "order": s["order"], "count": c})
-    pending = await db.approvals.count_documents({"status": "pending"})
+    pending = await db.stage_recommendations.count_documents({"status": "pending"})
     formadores = await db.users.count_documents({"role": "formador"})
     return {"total_users": total, "by_stage": by_stage, "pending_approvals": pending, "formadores": formadores}
 
@@ -429,6 +436,145 @@ async def admin_patch_user(uid: str, body: AdminUserPatch, user: dict = Depends(
 async def list_formadores(user: dict = Depends(require_roles("admin"))):
     fs = await db.users.find({"role": "formador"}).to_list(500)
     return [{"id": f["id"], "name": f["name"]} for f in fs]
+
+# ---------------- MASTER / Controle Mestre (permissão MANAGE_FORMATION_STAGE) ----------------
+class StageDecisionIn(BaseModel):
+    new_stage_order: int = 0
+    reason: str
+    action: str = "change"  # "change" | "maintain"
+
+class ResolveRecIn(BaseModel):
+    accept: bool
+    reason: str = ""
+
+class SettingsIn(BaseModel):
+    allow_stage_skip: bool
+
+async def notify(user_id: str, title: str, body: str):
+    await db.notifications.insert_one({"id": str(uuid.uuid4()), "user_id": user_id, "title": title,
+                                       "body": body, "read": False, "at": now_iso()})
+
+@api.get("/master/users")
+async def master_users(search: Optional[str] = None, master: dict = Depends(require_master)):
+    q = {"role": {"$in": ["membro", "formador"]}}
+    if search:
+        rx = {"$regex": search, "$options": "i"}
+        q["$or"] = [{"name": rx}, {"email": rx}]
+    users = await db.users.find(q).sort("name", 1).to_list(2000)
+    stages = {s["order"]: s async for s in db.stages.find()}
+    out = []
+    for u in users:
+        fs = await formation_status(u["id"], u["current_stage_order"])
+        out.append({"id": u["id"], "name": u["name"], "email": u["email"], "role": u["role"],
+                    "current_stage_order": u["current_stage_order"],
+                    "stage_name": stages.get(u["current_stage_order"], {}).get("name", ""),
+                    "progress_percent": fs["percent"], "formation_concluded": fs["concluded"],
+                    "formador_id": u.get("formador_id")})
+    return out
+
+@api.get("/master/users/{uid}")
+async def master_user_detail(uid: str, master: dict = Depends(require_master)):
+    u = await db.users.find_one({"id": uid})
+    if not u:
+        raise HTTPException(404, "Usuário não encontrado")
+    order = u["current_stage_order"]
+    fs = await formation_status(uid, order)
+    stage = await db.stages.find_one({"order": order})
+    req_lives = await db.lives.find({"stage_order": order, "required": True}).to_list(100)
+    lives_ok = 0
+    for l in req_lives:
+        if await db.live_attendance.find_one({"user_id": uid, "live_id": l["id"], "confirmed": True}):
+            lives_ok += 1
+    logs = await db.stage_change_logs.find({"user_id": uid}).sort("changed_at", -1).to_list(100)
+    for lg in logs:
+        lg.pop("_id", None)
+    recs = await db.stage_recommendations.find({"user_id": uid}).sort("created_at", -1).to_list(50)
+    for r in recs:
+        r.pop("_id", None)
+    return {"id": uid, "name": u["name"], "email": u["email"], "role": u["role"],
+            "current_stage_order": order, "stage_name": stage.get("name") if stage else "",
+            "formation": fs, "mandatory_lives": {"ok": lives_ok, "total": len(req_lives)},
+            "history": logs, "recommendations": recs, "formador_id": u.get("formador_id")}
+
+async def _apply_stage(uid: str, new_order: int, reason: str, action: str, master: dict, ip: Optional[str]):
+    u = await db.users.find_one({"id": uid})
+    if not u:
+        raise HTTPException(404, "Usuário não encontrado")
+    prev = u["current_stage_order"]
+    if action == "maintain":
+        new_order, change_type = prev, "MAINTAIN_STAGE"
+    else:
+        if not (1 <= new_order <= 6):
+            raise HTTPException(400, "Etapa inválida.")
+        change_type = "MAINTAIN_STAGE" if new_order == prev else ("ADVANCEMENT" if new_order > prev else "RETROCESSION")
+        if new_order != prev:
+            await db.users.update_one({"id": uid}, {"$set": {"current_stage_order": new_order}})
+    log = {"id": str(uuid.uuid4()), "user_id": uid, "previous_stage": prev, "new_stage": new_order,
+           "changed_by": master["id"], "changed_by_name": master["name"], "changed_at": now_iso(),
+           "reason": reason.strip(), "change_type": change_type, "ip": ip}
+    await db.stage_change_logs.insert_one(log)
+    stages = {s["order"]: s["name"] async for s in db.stages.find()}
+    if change_type == "MAINTAIN_STAGE":
+        await notify(uid, "Sua formação foi registrada", f"Sua caminhada continuará na etapa {stages.get(new_order,'')}.")
+    else:
+        await notify(uid, "Sua jornada foi atualizada", f"Sua etapa de formação foi atualizada para {stages.get(new_order,'')}. Continue sua caminhada de formação, comunidade e missão.")
+    if u.get("formador_id"):
+        await notify(u["formador_id"], "Decisão de etapa registrada", f"A decisão sobre a etapa de {u['name']} foi registrada pelo Login Mestre.")
+    log.pop("_id", None)
+    return log
+
+@api.post("/master/users/{uid}/stage")
+async def master_set_stage(uid: str, body: StageDecisionIn, request: Request, master: dict = Depends(require_master)):
+    if not body.reason.strip():
+        raise HTTPException(400, "O motivo da decisão é obrigatório.")
+    ip = request.client.host if request.client else None
+    log = await _apply_stage(uid, body.new_stage_order, body.reason, body.action, master, ip)
+    return {"ok": True, "log": log}
+
+@api.get("/master/recommendations")
+async def master_recommendations(master: dict = Depends(require_master)):
+    items = await db.stage_recommendations.find({"status": "pending"}).sort("created_at", 1).to_list(500)
+    for i in items:
+        i.pop("_id", None)
+    return items
+
+@api.post("/master/recommendations/{rid}/resolve")
+async def master_resolve_rec(rid: str, body: ResolveRecIn, request: Request, master: dict = Depends(require_master)):
+    r = await db.stage_recommendations.find_one({"id": rid})
+    if not r or r["status"] != "pending":
+        raise HTTPException(404, "Recomendação não encontrada")
+    status = "accepted" if body.accept else "rejected"
+    await db.stage_recommendations.update_one({"id": rid}, {"$set": {"status": status, "resolved_at": now_iso(), "resolved_by": master["id"]}})
+    await notify(r["formador_id"], "Recomendação respondida", f"Sua recomendação de etapa para {r['user_name']} foi {'aceita' if body.accept else 'recusada'} pelo Login Mestre.")
+    if body.accept:
+        ip = request.client.host if request.client else None
+        await _apply_stage(r["user_id"], r["recommended_stage_order"], body.reason or r["justification"], "change", master, ip)
+    return {"ok": True, "status": status}
+
+@api.get("/master/settings")
+async def get_settings(master: dict = Depends(require_master)):
+    s = await db.settings.find_one({"key": "app"})
+    if s:
+        s.pop("_id", None)
+    return s or {"key": "app", "allow_stage_skip": True}
+
+@api.put("/master/settings")
+async def put_settings(body: SettingsIn, master: dict = Depends(require_master)):
+    await db.settings.update_one({"key": "app"}, {"$set": {"allow_stage_skip": body.allow_stage_skip}}, upsert=True)
+    return {"ok": True}
+
+# ---------------- notifications ----------------
+@api.get("/notifications")
+async def get_notifications(user: dict = Depends(get_current_user)):
+    items = await db.notifications.find({"user_id": user["id"]}).sort("at", -1).to_list(50)
+    for i in items:
+        i.pop("_id", None)
+    return items
+
+@api.post("/notifications/read")
+async def read_notifications(user: dict = Depends(get_current_user)):
+    await db.notifications.update_many({"user_id": user["id"], "read": False}, {"$set": {"read": True}})
+    return {"ok": True}
 
 # ---------------- AI assistant (Fase 8) ----------------
 ASSISTANT_SYSTEM = (
@@ -489,7 +635,7 @@ class PresenceIn(BaseModel):
     percent: int = 0
 
 def live_accessible(live: dict, user: dict) -> bool:
-    if user["role"] in ("admin", "formador"):
+    if user["role"] in ("admin", "formador", "mestre"):
         return True
     so = live.get("stage_order")
     return so is None or so <= user["current_stage_order"]
@@ -586,7 +732,7 @@ async def search(q: str, user: dict = Depends(get_current_user)):
     if len(q) < 2:
         raise HTTPException(400, "Digite ao menos 2 caracteres.")
     rx = {"$regex": q, "$options": "i"}
-    max_order = 6 if user["role"] in ("admin", "formador") else user["current_stage_order"]
+    max_order = 6 if user["role"] in ("admin", "formador", "mestre") else user["current_stage_order"]
     lessons = await db.lessons.find({"stage_order": {"$lte": max_order}, "$or": [{"title": rx}, {"content": rx}, {"dimension": rx}]}).to_list(15)
     apol = await db.apologetics.find({"$or": [{"question": rx}, {"answer": rx}, {"category": rx}]}).to_list(15)
     answer = ""
@@ -745,21 +891,33 @@ async def seed():
             e["id"] = str(uuid.uuid4()); e["order"] = i
             await db.apologetics.insert_one(e)
 
-    # admin
+    # LOGIN MESTRE (owner) — única autoridade sobre etapas (MANAGE_FORMATION_STAGE)
     admin_email = os.environ["ADMIN_EMAIL"].lower()
     admin_pw = os.environ["ADMIN_PASSWORD"]
     existing = await db.users.find_one({"email": admin_email})
     admin_id = None
     if not existing:
         admin_id = str(uuid.uuid4())
-        await db.users.insert_one({"id": admin_id, "name": "Kelvin (Admin)", "email": admin_email,
-                                   "password_hash": hash_password(admin_pw), "role": "admin",
+        await db.users.insert_one({"id": admin_id, "name": "Kelvin (Login Mestre)", "email": admin_email,
+                                   "password_hash": hash_password(admin_pw), "role": "mestre",
                                    "current_stage_order": 6, "formador_id": None, "onboarded": True,
                                    "blocked": False, "avatar": None, "created_at": now_iso(), "last_active": now_iso()})
     else:
         admin_id = existing["id"]
+        if existing.get("role") != "mestre":
+            await db.users.update_one({"email": admin_email}, {"$set": {"role": "mestre", "name": "Kelvin (Login Mestre)"}})
         if not verify_password(admin_pw, existing["password_hash"]):
             await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_pw)}})
+
+    # demo admin comum (NÃO pode alterar etapas)
+    if not await db.users.find_one({"email": "admin@caminho.app"}):
+        await db.users.insert_one({"id": str(uuid.uuid4()), "name": "Roberto Admin", "email": "admin@caminho.app",
+                                   "password_hash": hash_password("***REMOVED***"), "role": "admin",
+                                   "current_stage_order": 6, "formador_id": None, "onboarded": True,
+                                   "blocked": False, "avatar": None, "created_at": now_iso(), "last_active": now_iso()})
+
+    # settings
+    await db.settings.update_one({"key": "app"}, {"$setOnInsert": {"key": "app", "allow_stage_skip": True}}, upsert=True)
 
     # demo formador
     former = await db.users.find_one({"email": "formador@caminho.app"})

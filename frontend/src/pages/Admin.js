@@ -57,14 +57,10 @@ export default function Admin() {
                 <div><p className="font-medium">{u.name}</p><p className="text-xs text-stone-500">{u.email}</p></div>
                 <span className="text-[10px] text-orange-500 border border-orange-600/40 rounded-full px-2 py-0.5">{u.role}</span>
               </div>
-              <div className="grid grid-cols-3 gap-2 text-xs">
+              <div className="grid grid-cols-2 gap-2 text-xs">
                 <select data-testid={`role-select-${u.id}`} value={u.role} onChange={(e) => patch(u.id, { role: e.target.value })}
                   className="bg-stone-800 border border-stone-700 rounded-lg px-2 py-2 text-stone-200">
                   {["membro", "formador", "moderador", "admin"].map((r) => <option key={r} value={r}>{r}</option>)}
-                </select>
-                <select data-testid={`stage-select-${u.id}`} value={u.current_stage_order} onChange={(e) => patch(u.id, { current_stage_order: Number(e.target.value) })}
-                  className="bg-stone-800 border border-stone-700 rounded-lg px-2 py-2 text-stone-200">
-                  {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>Etapa {n}</option>)}
                 </select>
                 <select data-testid={`formador-select-${u.id}`} value={u.formador_id || ""} onChange={(e) => patch(u.id, { formador_id: e.target.value })}
                   className="bg-stone-800 border border-stone-700 rounded-lg px-2 py-2 text-stone-200">
@@ -72,6 +68,7 @@ export default function Admin() {
                   {formadores.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
                 </select>
               </div>
+              <p className="text-[11px] text-stone-500 mt-2">Etapa atual: <span className="text-stone-300">{u.current_stage_order}</span> · alterável apenas pelo Login Mestre</p>
               <button data-testid={`block-${u.id}`} onClick={() => patch(u.id, { blocked: !u.blocked })}
                 className={`mt-2 text-xs ${u.blocked ? "text-green-500" : "text-red-400"}`}>
                 {u.blocked ? "Desbloquear" : "Bloquear"}

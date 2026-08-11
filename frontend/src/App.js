@@ -18,6 +18,7 @@ import Admin from "@/pages/Admin";
 import Assistant from "@/pages/Assistant";
 import Apologetics from "@/pages/Apologetics";
 import Search from "@/pages/Search";
+import MasterControl from "@/pages/MasterControl";
 
 function Splash() {
   return <div className="min-h-screen bg-stone-950 flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-orange-600" /></div>;
@@ -58,9 +59,10 @@ function App() {
           <Route path="/app/defesa" element={<Protected><Apologetics /></Protected>} />
           <Route path="/app/busca" element={<Protected><Search /></Protected>} />
           <Route path="/app/lives" element={<Protected><Lives /></Protected>} />
-          <Route path="/app/pessoas" element={<Protected roles={["formador", "admin"]}><MyPeople /></Protected>} />
+          <Route path="/app/pessoas" element={<Protected roles={["formador", "admin", "mestre"]}><MyPeople /></Protected>} />
           <Route path="/app/perfil" element={<Protected><Profile /></Protected>} />
-          <Route path="/app/admin" element={<Protected roles={["admin"]}><Admin /></Protected>} />
+          <Route path="/app/mestre" element={<Protected roles={["mestre"]}><MasterControl /></Protected>} />
+          <Route path="/app/admin" element={<Protected roles={["admin", "mestre"]}><Admin /></Protected>} />
           <Route path="*" element={<Navigate to="/app" replace />} />
         </Routes>
       </BrowserRouter>

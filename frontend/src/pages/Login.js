@@ -46,7 +46,7 @@ export default function Login() {
         </div>
 
         <p className="font-serifq italic text-2xl text-stone-300 mt-8 mb-8 leading-snug">
-          "Vinde e vede." <span className="text-stone-500 text-lg">— Jo 1,39</span>
+          "Os verdadeiros adoradores adorarão o Pai em espírito e verdade." <span className="text-stone-500 text-lg">— Jo 4,23</span>
         </p>
 
         <form onSubmit={submit} className="flex flex-col gap-4">

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../lib/api";
 import { Shell } from "../components/Shell";
 import { STAGE_ICONS, statusMeta } from "../lib/stages";
-import { Radio, Flame, CalendarDays, ChevronRight, Play, CheckCircle2, Loader2, Search, Sparkles, BookOpen } from "lucide-react";
+import { Radio, Flame, CalendarDays, ChevronRight, Play, CheckCircle2, Loader2, Search, Sparkles, BookOpen, Bell } from "lucide-react";
 
 function greeting() {
   const h = new Date().getHours();
@@ -12,8 +12,29 @@ function greeting() {
   return "Boa noite";
 }
 
-function Recommendations({ nav }) {
-  const [rec, setRec] = useState(null);
+function NotificationsBanner({ items }) {
+  const [list, setList] = useState(items);
+  const dismiss = async () => { try { await api.post("/notifications/read"); } catch {} setList([]); };
+  if (!list.length) return null;
+  return (
+    <section data-testid="notifications-banner" className="rounded-2xl border border-orange-600/40 bg-orange-600/10 p-4">
+      <div className="flex items-start gap-3">
+        <Bell className="w-5 h-5 text-orange-500 shrink-0 mt-0.5" />
+        <div className="flex-1">
+          {list.slice(0, 3).map((n) => (
+            <div key={n.id} className="mb-1 last:mb-0">
+              <p className="text-sm font-semibold">{n.title}</p>
+              <p className="text-xs text-stone-400">{n.body}</p>
+            </div>
+          ))}
+        </div>
+        <button data-testid="notifications-dismiss" onClick={dismiss} className="text-xs text-orange-400 shrink-0">Marcar lida</button>
+      </div>
+    </section>
+  );
+}
+
+function Recommendations({ nav }) {  const [rec, setRec] = useState(null);
   useEffect(() => { api.get("/recommendations").then((r) => setRec(r.data)).catch(() => setRec(false)); }, []);
   if (!rec) return null;
   return (
@@ -65,6 +86,11 @@ export default function Dashboard() {
           </div>
         </header>
 
+        {/* Notificações não lidas */}
+        {d.notifications?.length > 0 && (
+          <NotificationsBanner items={d.notifications} />
+        )}
+
         {/* Palavra do dia */}
         {d.word?.reference && (
           <section data-testid="word-of-day" className="rounded-2xl border border-stone-800 bg-stone-900 p-6 relative overflow-hidden">
@@ -90,6 +116,27 @@ export default function Dashboard() {
           </div>
           <ChevronRight className="text-stone-500" />
         </button>
+
+        {/* Etapa oficial x progresso formativo (conclusão NÃO promove) */}
+        {d.formation && (
+          <section data-testid="dash-formation-status" className="rounded-2xl border border-stone-800 bg-stone-900 p-5">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <p className="text-[10px] text-stone-500 uppercase tracking-widest">Minha etapa</p>
+                <p className="font-heading font-bold text-sm mt-1">{d.stage?.name}</p>
+              </div>
+              <div>
+                <p className="text-[10px] text-stone-500 uppercase tracking-widest">Progresso formativo</p>
+                <p className="font-heading font-bold text-sm mt-1 text-orange-500">{d.formation.percent}%</p>
+              </div>
+            </div>
+            <div className="mt-3 pt-3 border-t border-stone-800">
+              <p className="text-[10px] text-stone-500 uppercase tracking-widest">Status</p>
+              <p className="text-sm mt-1">{d.formation.concluded ? <span className="text-orange-400 font-semibold">Formação concluída</span> : "Em formação"}</p>
+              {d.formation.concluded && <p className="text-stone-400 text-xs mt-2">Próximo passo: aguardando decisão da liderança.</p>}
+            </div>
+          </section>
+        )}
 
         {/* Continue */}
         {d.continue_lesson && (
