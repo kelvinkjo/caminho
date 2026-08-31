@@ -31,6 +31,7 @@ import MediaManage from "@/pages/MediaManage";
 import BroadcastCenter from "@/pages/BroadcastCenter";
 import Studio from "@/pages/Studio";
 import BroadcastViewer from "@/pages/BroadcastViewer";
+import Management from "@/pages/Management";
 
 function Splash() {
   return <div className="min-h-screen bg-stone-950 flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-orange-600" /></div>;
@@ -87,6 +88,7 @@ function App() {
           <Route path="/app/passaporte" element={<Protected><Passport /></Protected>} />
           <Route path="/app/notificacoes" element={<Protected><Notifications /></Protected>} />
           <Route path="/app/admin" element={<Protected roles={["admin", "fundador", "cofundador", "mestre"]}><Admin /></Protected>} />
+          <Route path="/app/gestao" element={<Protected roles={["admin", "fundador", "cofundador", "formador_geral", "mestre"]}><Management /></Protected>} />
           <Route path="*" element={<Navigate to="/app" replace />} />
         </Routes>
       </BrowserRouter>

@@ -204,7 +204,7 @@ async def get_stages(user: dict = Depends(get_current_user)):
 
 @api.get("/stages/{order}/modules")
 async def get_modules(order: int, user: dict = Depends(get_current_user)):
-    if user["role"] in STAFF_ROLES and order > user["current_stage_order"]:
+    if user["role"] not in STAFF_ROLES and order > user["current_stage_order"]:
         raise HTTPException(403, "Etapa bloqueada")
     modules = await db.modules.find({"stage_order": order}).sort("order", 1).to_list(200)
     prog_docs = await db.lesson_progress.find({"user_id": user["id"]}).to_list(2000)
@@ -1060,7 +1060,10 @@ async def my_context(user: dict = Depends(get_current_user)):
 
 @api.get("/admin/users")
 async def admin_list_users(role: Optional[str] = None, search: Optional[str] = None,
-                           actor: dict = Depends(require_perm("MANAGE_USERS"))):
+                           actor: dict = Depends(get_current_user)):
+    is_fg = actor["role"] == "formador_geral"
+    if not (has_perm(actor, "MANAGE_USERS") or is_fg):
+        raise HTTPException(403, "Permissão necessária: MANAGE_USERS")
     q = {}
     if role:
         q["role"] = role
@@ -1068,6 +1071,10 @@ async def admin_list_users(role: Optional[str] = None, search: Optional[str] = N
         rx = {"$regex": search, "$options": "i"}
         q["$or"] = [{"name": rx}, {"email": rx}]
     users = await db.users.find(q).sort("name", 1).to_list(2000)
+    if is_fg:
+        # escopo: apenas formadores vinculados + membros desses formadores
+        my_formadores = {u["id"] async for u in db.users.find({"role": "formador", "general_formador_id": actor["id"]})}
+        users = [u for u in users if u["id"] in my_formadores or u.get("formador_id") in my_formadores]
     return [{"id": u["id"], "name": u["name"], "email": u["email"], "role": u["role"],
              "role_label": ROLE_LABEL.get(u["role"], u["role"]),
              "current_stage_order": u.get("current_stage_order"), "formation_stage": u.get("formation_stage"),
@@ -1130,6 +1137,8 @@ async def change_user_formation(uid: str, body: FormationChangeIn, request: Requ
     if actor["id"] == uid:
         raise HTTPException(403, "Você não pode alterar a própria etapa de formação.")
     target = await _load_user(uid)
+    if is_admin_protected(target) and actor["role"] != "admin":
+        raise HTTPException(403, ADMIN_PROTECTED_MSG)
     settings = await db.settings.find_one({"key": "app"}) or {}
     requires_approval = settings.get("stage_change_requires_approval", True)
     cofound_can = settings.get("cofundador_can_change_stage", False)

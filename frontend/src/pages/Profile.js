@@ -63,6 +63,12 @@ export default function Profile() {
             </button>
           )}
 
+          {(INSTITUTIONAL.includes(user.role) || user.role === "formador_geral") && (
+            <button data-testid="profile-gestao" onClick={() => nav("/app/gestao")} className="w-full flex items-center gap-3 rounded-xl border border-stone-800 bg-stone-900 p-4 active:scale-[0.99] transition-transform">
+              <Users className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Gestão de Usuários</span><ChevronRight className="text-stone-500" />
+            </button>
+          )}
+
           {INSTITUTIONAL.includes(user.role) && (
             <button data-testid="profile-mestre" onClick={() => nav("/app/mestre")} className="w-full flex items-center gap-3 rounded-xl border border-orange-600/40 bg-orange-600/10 p-4 active:scale-[0.99] transition-transform">
               <Crown className="w-5 h-5 text-orange-500" /><span className="flex-1 text-left">Controle de Etapas</span><ChevronRight className="text-stone-500" />
