@@ -96,7 +96,9 @@ export default function Management() {
     } catch (e) { toast.error(apiError(e.response?.data?.detail)); setUsers([]); }
     if (isApprover) { try { const r = await api.get("/formation/stage-requests"); setRequests(r.data); } catch {} }
   };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  // Load management data once when the page mounts.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, []);
 
   const gerais = (users || []).filter((u) => u.role === "formador_geral");
 

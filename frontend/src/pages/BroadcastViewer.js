@@ -32,16 +32,25 @@ export default function BroadcastViewer() {
           const room = await connectViewer({
             serverUrl: data.server_url, token: data.token,
             onStatus: setConnState,
-            onVideo: (track) => { if (videoRef.current) track.attach(videoRef.current); },
+            onVideo: (track) => {
+              if (mounted && videoRef.current && videoRef.current.parentNode) {
+                track.attach(videoRef.current);
+              }
+            },
           });
-          roomRef.current = room;
+          if (mounted) roomRef.current = room;
         } catch (e) {
-          if (e.response?.status === 503) setConnState("no-server");
-          else setError(apiError(e.response?.data?.detail));
+          if (mounted) {
+            if (e.response?.status === 503) setConnState("no-server");
+            else setError(apiError(e.response?.data?.detail));
+          }
         }
       }
-    }).catch((e) => setError(apiError(e.response?.data?.detail)));
-    return () => { mounted = false; roomRef.current?.disconnect?.(); };
+    }).catch((e) => { if (mounted) setError(apiError(e.response?.data?.detail)); });
+    return () => {
+      mounted = false;
+      roomRef.current?.disconnect?.();
+    };
     // eslint-disable-next-line
   }, [id]);
 

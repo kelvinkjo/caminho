@@ -90,7 +90,10 @@ export default function Studio() {
       const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       streamRef.current = s;
       setCamGranted(true); setMicGranted(true);
-      if (videoRef.current) { videoRef.current.srcObject = s; await videoRef.current.play().catch(() => {}); }
+      if (videoRef.current && videoRef.current.parentNode) {
+        videoRef.current.srcObject = s;
+        await videoRef.current.play().catch(() => {});
+      }
       const { cameras, microphones } = await listDevices();
       setCams(cameras); setMics(microphones);
       setCamId(cameras[0]?.deviceId || ""); setMicId(microphones[0]?.deviceId || "");
@@ -128,11 +131,13 @@ export default function Studio() {
         audio: micId ? { deviceId: { exact: micId } } : true,
       });
       streamRef.current = s;
-      if (videoRef.current) videoRef.current.srcObject = s;
+      if (videoRef.current && videoRef.current.parentNode) videoRef.current.srcObject = s;
       startMeter(s);
     } catch { toast.error("Não foi possível trocar o dispositivo."); }
   };
-  useEffect(() => { if (camGranted) switchDevice(); /* eslint-disable-next-line */ }, [camId, micId]);
+  // Switch devices only after the selected device IDs change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (camGranted) switchDevice(); }, [camId, micId]);
 
   const toggleCam = () => { const t = streamRef.current?.getVideoTracks()[0]; if (t) { t.enabled = !camOn; setCamOn(!camOn); } };
   const toggleMic = () => { const t = streamRef.current?.getAudioTracks()[0]; if (t) { t.enabled = !micOn; setMicOn(!micOn); } };
@@ -147,7 +152,10 @@ export default function Studio() {
     try {
       const s = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
       screenStreamRef.current = s; setScreenOn(true);
-      if (screenRef.current) { screenRef.current.srcObject = s; screenRef.current.play().catch(() => {}); }
+      if (screenRef.current && screenRef.current.parentNode) {
+        screenRef.current.srcObject = s;
+        screenRef.current.play().catch(() => {});
+      }
       s.getVideoTracks()[0].addEventListener("ended", () => { setScreenOn(false); screenStreamRef.current = null; });
       if (layout === "full") applyOverlay({ layout: "content" });
     } catch { toast.error("Compartilhamento de tela cancelado."); }
@@ -220,8 +228,23 @@ export default function Studio() {
   if (!b) return <Shell><div className="flex justify-center py-20"><Loader2 className="animate-spin text-orange-600" /></div></Shell>;
 
   const isLive = b.status === "live";
-  const camEl = (cls) => <video key="cam" ref={videoRef} muted playsInline className={cls} />;
-  const scrEl = (cls) => <video key="scr" ref={screenRef} muted playsInline className={cls} />;
+  const camClass = !screenOn || layout === "full"
+    ? "w-full h-full object-cover"
+    : layout === "content"
+      ? "absolute bottom-2 right-2 w-1/3 h-1/3 object-cover rounded-lg border border-stone-700"
+      : layout === "pip"
+        ? "w-full h-full object-cover"
+        : "w-1/2 h-full object-cover";
+  const screenClass = screenOn
+    ? layout === "content"
+      ? "w-full h-full object-contain"
+      : layout === "pip"
+        ? "absolute bottom-2 right-2 w-1/3 h-1/3 object-contain rounded-lg border border-stone-700 bg-black"
+        : layout === "side"
+          ? "w-1/2 h-full object-contain bg-black"
+          : "hidden"
+    : "hidden";
+  const compositionClass = screenOn && layout === "side" ? "absolute inset-0 flex" : "absolute inset-0";
 
   return (
     <Shell>
@@ -236,11 +259,10 @@ export default function Studio() {
         {!lkConfigured && <div data-testid="lk-not-configured" className="mb-4 rounded-xl border border-amber-600/40 bg-amber-600/10 p-3 text-amber-300 text-xs">⚠️ Servidor de transmissão (LiveKit) ainda não configurado. Você pode testar câmera/microfone, cenas e overlays; o vídeo será transmitido assim que as credenciais forem informadas.</div>}
 
         <div className="relative rounded-2xl overflow-hidden border border-stone-800 bg-black mb-3" style={{ aspectRatio: "16/9" }} data-testid="studio-preview">
-          {/* composição por layout */}
-          {(!screenOn || layout === "full") && camEl("w-full h-full object-cover")}
-          {screenOn && layout === "content" && <>{scrEl("w-full h-full object-contain")}{camEl("absolute bottom-2 right-2 w-1/3 h-1/3 object-cover rounded-lg border border-stone-700")}</>}
-          {screenOn && layout === "pip" && <>{camEl("w-full h-full object-cover")}{scrEl("absolute bottom-2 right-2 w-1/3 h-1/3 object-contain rounded-lg border border-stone-700 bg-black")}</>}
-          {screenOn && layout === "side" && <div className="absolute inset-0 flex">{camEl("w-1/2 h-full object-cover")}{scrEl("w-1/2 h-full object-contain bg-black")}</div>}
+          <div className={compositionClass}>
+            <video ref={videoRef} muted playsInline className={camClass} />
+            <video ref={screenRef} muted playsInline className={screenClass} />
+          </div>
 
           <OverlayLayer scene={scene} />
           {!camGranted && (

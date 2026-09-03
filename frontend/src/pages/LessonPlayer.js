@@ -15,6 +15,8 @@ export default function LessonPlayer() {
     .catch((e) => {
       if (e.response?.status === 403) { toast.error("Aula bloqueada. Avance na sua jornada primeiro."); nav("/app/jornada", { replace: true }); }
     });
+  // Reload when the lesson changes; load is intentionally scoped to this render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [id]);
 
   const complete = async () => {

@@ -16,7 +16,9 @@ export function ChatPanel({ bid, canModerate }) {
     try { const { data } = await api.get(`/broadcasts/${bid}/chat`); setMsgs(data.messages); setEnabled(data.chat_enabled); }
     catch { /* silencioso no polling */ }
   };
-  useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t); /* eslint-disable-next-line */ }, [bid]);
+  // Poll only when the broadcast changes; load is intentionally scoped to this render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, [bid]);
   useEffect(() => { if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight; }, [msgs]);
 
   const send = async () => {

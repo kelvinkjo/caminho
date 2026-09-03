@@ -73,7 +73,9 @@ export default function MediaCenter() {
     } catch (e) { toast.error(apiError(e.response?.data?.detail)); setItems([]); }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [tab]);
+  // Refresh when the selected media tab changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(); }, [tab]);
 
   const open = (m) => nav(`/app/midia/${m.id}`);
 
