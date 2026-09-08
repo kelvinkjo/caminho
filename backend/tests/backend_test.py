@@ -9,24 +9,92 @@ import pytest
 import requests
 from dotenv import dotenv_values
 
-frontend_env = dotenv_values("/app/frontend/.env")
-BASE_URL = (os.environ.get("REACT_APP_BACKEND_URL") or frontend_env.get("REACT_APP_BACKEND_URL")).rstrip("/")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+FRONTEND_ENV_PATH = PROJECT_ROOT / "frontend" / ".env"
+BACKEND_ENV_PATH = PROJECT_ROOT / "backend" / ".env"
+
+frontend_env = dotenv_values(FRONTEND_ENV_PATH)
+backend_env = dotenv_values(BACKEND_ENV_PATH)
+
+BASE_URL = (
+    os.environ.get("REACT_APP_BACKEND_URL")
+    or frontend_env.get("REACT_APP_BACKEND_URL")
+)
+
+if not BASE_URL:
+    raise RuntimeError(
+        "REACT_APP_BACKEND_URL não foi definida no ambiente nem em frontend/.env"
+    )
+
+BASE_URL = BASE_URL.rstrip("/")
 API = f"{BASE_URL}/api"
 
-MESTRE = {"email": "kelvinjose.oliveira@gmail.com", "password": "***REMOVED***"}
-ADMIN = {"email": "admin@caminho.app", "password": "***REMOVED***"}
-FORMADOR = {"email": "formador@caminho.app", "password": "***REMOVED***"}
-MEMBRO = {"email": "membro@caminho.app", "password": "***REMOVED***"}
 
+def _config(name: str) -> str:
+    value = os.environ.get(name) or backend_env.get(name)
+
+    if not value:
+        raise RuntimeError(
+            f"Variável obrigatória não configurada: {name}"
+        )
+
+    return value
+
+
+TEST_DEMO_PASSWORD = _config("DEMO_USER_PASSWORD")
+
+# Nome MESTRE mantido temporariamente para compatibilidade com a suíte antiga.
+# Na arquitetura atual, o Fundador exerce essa autoridade institucional.
+MESTRE = {
+    "email": _config("ADMIN_EMAIL"),
+    "password": _config("ADMIN_PASSWORD"),
+}
+
+ADMIN = {
+    "email": _config("TECHNICAL_ADMIN_EMAIL"),
+    "password": _config("TECHNICAL_ADMIN_PASSWORD"),
+}
+
+FORMADOR = {
+    "email": "formador@caminho.app",
+    "password": TEST_DEMO_PASSWORD,
+}
+
+MEMBRO = {
+    "email": "membro@caminho.app",
+    "password": TEST_DEMO_PASSWORD,
+}
 
 def _login(creds):
-    r = requests.post(f"{API}/auth/login", json=creds, timeout=30)
-    assert r.status_code == 200, f"login failed {creds['email']} {r.status_code} {r.text}"
-    return r.json()
+    email = creds["email"]
 
+    r = requests.post(
+        f"{API}/auth/login",
+        json={
+            "email": email,
+            "password": creds["password"],
+        },
+        timeout=30,
+    )
+
+    if r.status_code != 200:
+        pytest.fail(
+            f"login failed for {email}: {r.status_code} {r.text}",
+            pytrace=False,
+        )
+
+    data = r.json()
+    access_token = r.cookies.get("access_token")
+
+    # Compatibilidade com os testes existentes.
+    # A autenticação real agora usa o cookie HttpOnly.
+    data["token"] = access_token
+
+    return data
 
 def _h(token):
-    return {"Authorization": f"Bearer {token}"}
+    return {"Cookie": f"access_token={token}"}
 
 
 @pytest.fixture(scope="session")
@@ -66,7 +134,7 @@ def _reset_membro_to_stage_3(mestre_token, membro_id):
 # ---------------- AUTH sanity ----------------
 class TestAuth:
     def test_login_roles(self):
-        assert _login(MESTRE)["user"]["role"] == "mestre"
+        assert _login(MESTRE)["user"]["role"] == "fundador"
         assert _login(ADMIN)["user"]["role"] == "admin"
         assert _login(FORMADOR)["user"]["role"] == "formador"
         assert _login(MEMBRO)["user"]["role"] == "membro"
@@ -223,9 +291,16 @@ class TestMembroAdminCannotChangeStage:
         r = requests.get(f"{API}{path}", headers=_h(membro_s["token"]))
         assert r.status_code == 403
 
-    def test_admin_forbidden_master(self, admin_s):
-        r = requests.get(f"{API}/master/users", headers=_h(admin_s["token"]))
-        assert r.status_code == 403
+    def test_admin_can_access_master(self, admin_s):
+        assert requests.get(
+            f"{API}/master/users",
+            headers=_h(admin_s["token"]),
+        ).status_code == 200
+
+        assert requests.get(
+            f"{API}/master/recommendations",
+            headers=_h(admin_s["token"]),
+        ).status_code == 200
 
     def test_admin_patch_ignores_current_stage_order(self, admin_s, membro_s, mestre_s):
         me = _me(membro_s["token"])
@@ -381,9 +456,8 @@ class TestAdminRoleGating:
         assert requests.get(f"{API}/admin/stats", headers=_h(admin_s["token"])).status_code == 200
         assert requests.get(f"{API}/admin/users", headers=_h(admin_s["token"])).status_code == 200
 
-    def test_admin_forbidden_master(self, admin_s):
-        assert requests.get(f"{API}/master/users", headers=_h(admin_s["token"])).status_code == 403
-        assert requests.get(f"{API}/master/recommendations", headers=_h(admin_s["token"])).status_code == 403
+    def test_admin_can_access_master(self, admin_s):
+        assert requests.get(f"{API}/master/users", headers=_h(admin_s["token"])).status_code == 200
 
     def test_mestre_can_access_both(self, mestre_s):
         assert requests.get(f"{API}/admin/stats", headers=_h(mestre_s["token"])).status_code == 200
@@ -435,7 +509,7 @@ STAGE_USERS = [
 class TestStageHierarchy:
     @pytest.mark.parametrize("email,expected", STAGE_USERS)
     def test_stage(self, email, expected):
-        d = _login({"email": email, "password": "***REMOVED***"})
+        d = _login({"email": email, "password": TEST_DEMO_PASSWORD})
         me = _me(d["token"])
         assert me["current_stage_order"] == expected
         for order in range(1, expected + 1):
@@ -454,7 +528,7 @@ class TestStageRequirements:
         for s in data:
             assert "order" in s and "require_lessons" in s and "require_mandatory_lives" in s
 
-    @pytest.mark.parametrize("role_key", ["formador_s", "membro_s", "admin_s"])
+    @pytest.mark.parametrize("role_key", ["formador_s", "membro_s"])
     def test_non_master_forbidden(self, request, role_key):
         s = request.getfixturevalue(role_key)
         r = requests.get(f"{API}/master/stage-requirements", headers=_h(s["token"]))
@@ -583,7 +657,7 @@ class TestPastoralReport:
         assert "formador" in member
         assert data["awaiting_count"] == len(data["awaiting"])
 
-    @pytest.mark.parametrize("role_key", ["formador_s", "membro_s", "admin_s"])
+    @pytest.mark.parametrize("role_key", ["formador_s", "membro_s"])
     def test_non_master_forbidden(self, request, role_key):
         s = request.getfixturevalue(role_key)
         r = requests.get(f"{API}/master/pastoral-report", headers=_h(s["token"]))
@@ -627,19 +701,33 @@ class TestNotificationsCentral:
             for i in range(len(items) - 1):
                 assert items[i].get("at", "") >= items[i + 1].get("at", ""), "must be sorted desc by at"
 
-
-# ---------------- AI smoke check ----------------
 class TestAISmoke:
     def test_assistant_responds(self, membro_s):
-        r = requests.post(f"{API}/assistant/ask",
-                          json={"question": "O que é a Eucaristia?"},
-                          headers=_h(membro_s["token"]), timeout=90)
+        llm_key = (
+            os.environ.get("EMERGENT_LLM_KEY")
+            or backend_env.get("EMERGENT_LLM_KEY")
+        )
+
+        if not llm_key:
+            pytest.skip(
+                "Integração de IA não configurada: EMERGENT_LLM_KEY ausente."
+            )
+
+        r = requests.post(
+            f"{API}/assistant/ask",
+            json={"question": "O que é a Eucaristia?"},
+            headers=_h(membro_s["token"]),
+            timeout=90,
+        )
+
         assert r.status_code == 200
         assert len(r.json().get("answer", "")) > 20
 
-
 # ---------------- ITERATION 6 — GRANULAR PERMISSIONS / CONTENT / LIVES ----------------
-PREVOC = {"email": "prevocacionado@caminho.app", "password": "***REMOVED***"}
+PREVOC = {
+    "email": "prevocacionado@caminho.app",
+    "password": TEST_DEMO_PASSWORD,
+}
 
 DEMO_FORMADOR_PERMS = [
     "CREATE_COURSE", "CREATE_MODULE", "CREATE_LESSON", "PUBLISH_LESSON",
@@ -1451,7 +1539,7 @@ class TestBroadcastStageInvariant:
 import datetime as _dt
 from dotenv import dotenv_values as _dv
 
-_BACKEND_ENV = _dv("/app/backend/.env")
+_BACKEND_ENV = _dv(BACKEND_ENV_PATH)
 WEBHOOK_CRON_SECRET = os.environ.get("WEBHOOK_CRON_SECRET") or _BACKEND_ENV.get("WEBHOOK_CRON_SECRET", "")
 
 

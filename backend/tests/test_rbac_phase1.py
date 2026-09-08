@@ -17,31 +17,110 @@ import os
 import time
 import pytest
 import requests
+from pathlib import Path
 from dotenv import dotenv_values
 
-frontend_env = dotenv_values("/app/frontend/.env")
-BASE_URL = (os.environ.get("REACT_APP_BACKEND_URL") or frontend_env.get("REACT_APP_BACKEND_URL")).rstrip("/")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FRONTEND_ENV_PATH = PROJECT_ROOT / "frontend" / ".env"
+
+frontend_env = dotenv_values(FRONTEND_ENV_PATH)
+
+BASE_URL = (
+    os.environ.get("REACT_APP_BACKEND_URL")
+    or frontend_env.get("REACT_APP_BACKEND_URL")
+)
+
+if not BASE_URL:
+    raise RuntimeError(
+        "REACT_APP_BACKEND_URL não foi definida no ambiente nem em frontend/.env"
+    )
+
+BASE_URL = BASE_URL.rstrip("/")
+
+# ============================================================
+# CONFIGURAÇÃO SEGURA DOS TESTES
+# ============================================================
+
+BACKEND_ENV_PATH = PROJECT_ROOT / "backend" / ".env"
+backend_env = dotenv_values(BACKEND_ENV_PATH)
+
 API = f"{BASE_URL}/api"
 
+
+def _config(name: str) -> str:
+    """
+    Obtém configuração primeiro do ambiente do processo
+    e depois do backend/.env local.
+
+    Nunca possui credenciais hardcoded no código.
+    """
+    value = os.environ.get(name) or backend_env.get(name)
+
+    if not value:
+        raise RuntimeError(
+            f"Variável obrigatória não configurada: {name}"
+        )
+
+    return value
+
+
+DEMO_PASSWORD = _config("DEMO_USER_PASSWORD")
+
 CREDS = {
-    "fundador": {"email": "kelvinjose.oliveira@gmail.com", "password": "***REMOVED***"},
-    "admin": {"email": "admin@caminho.app", "password": "***REMOVED***"},
-    "geral": {"email": "geral@caminho.app", "password": "***REMOVED***"},
-    "formador": {"email": "formador@caminho.app", "password": "***REMOVED***"},
-    "membro": {"email": "membro@caminho.app", "password": "***REMOVED***"},
-    "prevoc": {"email": "prevocacionado@caminho.app", "password": "***REMOVED***"},
+    "fundador": {
+        "email": _config("ADMIN_EMAIL"),
+        "password": _config("ADMIN_PASSWORD"),
+    },
+    "admin": {
+        "email": _config("TECHNICAL_ADMIN_EMAIL"),
+        "password": _config("TECHNICAL_ADMIN_PASSWORD"),
+    },
+    "geral": {
+        "email": "geral@caminho.app",
+        "password": DEMO_PASSWORD,
+    },
+    "formador": {
+        "email": "formador@caminho.app",
+        "password": DEMO_PASSWORD,
+    },
+    "membro": {
+        "email": "membro@caminho.app",
+        "password": DEMO_PASSWORD,
+    },
+    "prevoc": {
+        "email": "prevocacionado@caminho.app",
+        "password": DEMO_PASSWORD,
+    },
 }
 
 
 def _login(key):
-    r = requests.post(f"{API}/auth/login", json=CREDS[key], timeout=30)
-    assert r.status_code == 200, f"login {key} failed: {r.status_code} {r.text}"
-    return r.json()
+    r = requests.post(
+        f"{API}/auth/login",
+        json=CREDS[key],
+        timeout=30,
+    )
+
+    assert r.status_code == 200, (
+        f"login {key} failed: {r.status_code} {r.text}"
+    )
+
+    access_token = r.cookies.get("access_token")
+
+    assert access_token, (
+        f"login {key} realizado, mas o cookie access_token não foi definido"
+    )
+
+    data = r.json()
+    data["token"] = access_token
+
+    return data
 
 
-def _h(t):
-    return {"Authorization": f"Bearer {t}"}
-
+def _h(token):
+    return {
+        "Cookie": f"access_token={token}"
+    }
 
 @pytest.fixture(scope="module")
 def sessions():
@@ -103,7 +182,8 @@ class TestMeContext:
 # ---------------- 2. ADMIN PROTEGIDO (TESTE 49) ----------------
 class TestAdminProtected:
     def test_fundador_cannot_change_admin_role(self, sessions):
-        admin = _find_user(sessions["fundador"]["token"], "admin@caminho.app")
+        admin = _find_user(sessions["fundador"]["token"],
+        CREDS["admin"]["email"],)
         r = requests.patch(f"{API}/admin/users/{admin['id']}/role",
                            json={"role": "formador"},
                            headers=_h(sessions["fundador"]["token"]))

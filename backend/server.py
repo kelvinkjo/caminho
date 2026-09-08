@@ -27,6 +27,24 @@ JWT_SECRET = os.environ['JWT_SECRET']
 JWT_ALG = "HS256"
 
 app = FastAPI()
+
+cors_origins = [
+    origin.strip()
+    for origin in os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:3000",
+    ).split(",")
+    if origin.strip()
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
+)
+
 api = APIRouter(prefix="/api")
 
 # ---------------- helpers ----------------
@@ -42,8 +60,12 @@ def verify_password(p: str, h: str) -> bool:
     except Exception:
         return False
 
-def create_token(uid: str, ttl_hours=720):
-    payload = {"sub": uid, "exp": datetime.now(timezone.utc) + timedelta(hours=ttl_hours), "type": "access"}
+def create_token(uid: str, ttl_minutes=15):
+    payload = {
+        "sub": uid,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes),
+        "type": "access",
+    }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
 
 def public_user(u: dict) -> dict:
@@ -118,7 +140,24 @@ class AdminUserPatch(BaseModel):
 
 # ---------------- auth endpoints ----------------
 def set_cookie(resp: Response, token: str):
-    resp.set_cookie("access_token", token, httponly=True, secure=True, samesite="none", max_age=2592000, path="/")
+    cookie_secure = os.environ.get("COOKIE_SECURE", "true").lower() == "true"
+    cookie_samesite = os.environ.get("COOKIE_SAMESITE", "lax").lower()
+
+    if cookie_samesite not in {"lax", "strict", "none"}:
+        raise RuntimeError("COOKIE_SAMESITE inválido.")
+
+    if cookie_samesite == "none" and not cookie_secure:
+        raise RuntimeError("COOKIE_SAMESITE=none exige COOKIE_SECURE=true.")
+
+    resp.set_cookie(
+        "access_token",
+        token,
+        httponly=True,
+        secure=cookie_secure,
+        samesite=cookie_samesite,
+        max_age=900,
+        path="/",
+    )
 
 @api.post("/auth/register")
 async def register(body: RegisterIn, response: Response):
@@ -136,7 +175,7 @@ async def register(body: RegisterIn, response: Response):
     await db.users.insert_one(doc)
     token = create_token(uid)
     set_cookie(response, token)
-    return {"user": public_user(doc), "token": token}
+    return {"user": public_user(doc)}
 
 @api.post("/auth/login")
 async def login(body: LoginIn, response: Response):
@@ -148,7 +187,7 @@ async def login(body: LoginIn, response: Response):
         raise HTTPException(403, "Conta bloqueada")
     token = create_token(u["id"])
     set_cookie(response, token)
-    return {"user": public_user(u), "token": token}
+    return {"user": public_user(u)}
 
 @api.post("/auth/logout")
 async def logout(response: Response):
@@ -914,9 +953,17 @@ def is_top_authority(u): return u.get("role") in TOP_AUTHORITY
 def is_admin_protected(u): return u.get("role") == "admin" or u.get("admin_protected") is True
 
 def effective_perms(user: dict):
-    if user.get("role") in TOP_AUTHORITY:
+    role = user.get("role")
+
+    if role in TOP_AUTHORITY:
         return set(ALL_PERMISSIONS)
-    base = set(ROLE_DEFAULT_PERMS.get(user.get("role"), []))
+
+    # Formadores possuem permissões explicitamente delegadas.
+    # Remover uma permissão deve realmente revogá-la.
+    if role == "formador":
+        return set(user.get("permissions") or [])
+
+    base = set(ROLE_DEFAULT_PERMS.get(role, []))
     return base | set(user.get("permissions") or [])
 
 def has_perm(user: dict, perm: str) -> bool:
@@ -2127,14 +2174,20 @@ SEED_MODULES = {
 
 DIM = ["Oração", "Formação", "Comunidade", "Missão", "Vocação"]
 
+
 async def seed():
+    seed_demo_users = os.environ.get("SEED_DEMO_USERS", "false").lower() == "true"
+
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
 
     # stages
     for s in STAGES:
-        await db.stages.update_one({"order": s["order"]}, {"$set": s}, upsert=True)
-
+        await db.stages.update_one(
+            {"order": s["order"]},
+            {"$setOnInsert": s},
+            upsert=True
+        )
     # modules + lessons
     if await db.modules.count_documents({}) == 0:
         for stage_order, mods in SEED_MODULES.items():
@@ -2166,15 +2219,16 @@ async def seed():
         for i, (t, dim) in enumerate(missions, start=1):
             await db.missions.insert_one({"id": str(uuid.uuid4()), "order": i, "title": t,
                                           "dimension": dim, "active": True, "week": "Semana atual"})
-
     # daily word
-    await db.daily_readings.update_one({"kind": "word"}, {"$set": {
-        "kind": "word", "reference": "João 15, 5",
-        "text": "Eu sou a videira, vós os ramos. Quem permanece em mim e eu nele, esse dá muito fruto; porque sem mim nada podeis fazer.",
-        "reflection": "Permanecer em Cristo é a fonte de toda a nossa vida e missão. Hoje, procure permanecer nEle em cada gesto.",
-        "prayer": "Senhor, ensina-me a permanecer em Ti. Que a minha vida dê muito fruto para o Teu Reino. Amém.",
-        "challenge": "Reserve 10 minutos de silêncio para permanecer diante de Deus.",
-    }}, upsert=True)
+    if await db.daily_readings.count_documents({"kind": "word"}) == 0:
+        await db.daily_readings.insert_one({
+            "kind": "word",
+            "reference": "João 15, 5",
+            "text": "Eu sou a videira, vós os ramos. Quem permanece em mim e eu nele, esse dá muito fruto; porque sem mim nada podeis fazer.",
+            "reflection": "Permanecer em Cristo é a fonte de toda a nossa vida e missão. Hoje, procure permanecer nEle em cada gesto.",
+            "prayer": "Senhor, ensina-me a permanecer em Ti. Que a minha vida dê muito fruto para o Teu Reino. Amém.",
+            "challenge": "Reserve 10 minutos de silêncio para permanecer diante de Deus.",
+        })
 
     # events
     if await db.events.count_documents({}) == 0:
@@ -2212,8 +2266,6 @@ async def seed():
                 "chat_enabled": False, "status": "published",
                 "owner_id": oid, "owner_name": oname, "created_at": now_iso(),
             })
-
-
     # lives
     if await db.lives.count_documents({}) == 0:
         base = datetime.now(timezone.utc)
@@ -2276,30 +2328,48 @@ async def seed():
                                    "formation_status": "ATIVO", "formador_id": None, "general_formador_id": None,
                                    "permissions": [], "onboarded": True, "blocked": False, "avatar": None,
                                    "created_at": now_iso(), "last_active": now_iso()})
-    else:
-        if existing.get("role") in (None, "mestre", "membro"):
-            await db.users.update_one({"email": admin_email}, {"$set": {"role": "fundador", "name": "Kelvin (Fundador)"}})
-        if existing.get("blocked"):
-            await db.users.update_one({"email": admin_email}, {"$set": {"blocked": False}})
-        if not verify_password(admin_pw, existing["password_hash"]):
-            await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_pw)}})
-
     # ADMIN técnico PROTEGIDO (imutável por Fundador/Cofundador)
-    adm = await db.users.find_one({"email": "admin@caminho.app"})
-    if not adm:
-        await db.users.insert_one({"id": str(uuid.uuid4()), "name": "Admin Técnico", "email": "admin@caminho.app",
-                                   "password_hash": hash_password("***REMOVED***"), "role": "admin", "admin_protected": True,
-                                   "current_stage_order": 6, "formation_stage": "CONSAGRADO", "formation_year": None,
-                                   "formation_status": "ATIVO", "formador_id": None, "general_formador_id": None,
-                                   "permissions": [], "onboarded": True, "blocked": False, "avatar": None,
-                                   "created_at": now_iso(), "last_active": now_iso()})
-    else:
-        await db.users.update_one({"email": "admin@caminho.app"}, {"$set": {"role": "admin", "admin_protected": True, "blocked": False}})
+    technical_admin_email = os.environ["TECHNICAL_ADMIN_EMAIL"].lower()
+    technical_admin_password = os.environ["TECHNICAL_ADMIN_PASSWORD"]
 
+    adm = await db.users.find_one({"email": technical_admin_email})
+
+    if not adm:
+        await db.users.insert_one({
+            "id": str(uuid.uuid4()),
+            "name": "Admin Técnico",
+            "email": technical_admin_email,
+            "password_hash": hash_password(technical_admin_password),
+            "role": "admin",
+            "admin_protected": True,
+            "current_stage_order": 6,
+            "formation_stage": "CONSAGRADO",
+            "formation_year": None,
+            "formation_status": "ATIVO",
+            "formador_id": None,
+            "general_formador_id": None,
+            "permissions": [],
+            "onboarded": True,
+            "blocked": False,
+            "avatar": None,
+            "created_at": now_iso(),
+            "last_active": now_iso()
+        })
     # settings
-    await db.settings.update_one({"key": "app"}, {"$setOnInsert": {"key": "app", "allow_stage_skip": True}}, upsert=True)
-    for _k, _v in {"stage_change_requires_approval": True, "cofundador_can_change_stage": False}.items():
-        await db.settings.update_one({"key": "app", _k: {"$exists": False}}, {"$set": {_k: _v}})
+    await db.settings.update_one(
+        {"key": "app"},
+        {"$setOnInsert": {"key": "app", "allow_stage_skip": True}},
+        upsert=True
+    )
+
+    for _k, _v in {
+        "stage_change_requires_approval": True,
+        "cofundador_can_change_stage": False
+    }.items():
+        await db.settings.update_one(
+            {"key": "app", _k: {"$exists": False}},
+            {"$set": {_k: _v}}
+        )
 
     # backfill separação role×etapa em todos os usuários
     async for _u in db.users.find({"$or": [{"formation_stage": {"$exists": False}}, {"formation_status": {"$exists": False}}, {"general_formador_id": {"$exists": False}}]}):
@@ -2317,91 +2387,216 @@ async def seed():
         await db.stage_requirements.update_one({"order": s["order"]},
             {"$setOnInsert": {"order": s["order"], "require_lessons": True, "require_mandatory_lives": True}}, upsert=True)
 
-    # permissões: garante campo em todos; concede conjunto demo ao formador
-    await db.users.update_many({"permissions": {"$exists": False}}, {"$set": {"permissions": []}})
-    demo_former_perms = ["CREATE_COURSE", "EDIT_COURSE", "CREATE_MODULE", "CREATE_LESSON", "EDIT_LESSON",
-                         "PUBLISH_LESSON", "UPLOAD_VIDEO", "UPLOAD_AUDIO", "UPLOAD_DOCUMENT",
-                         "CREATE_ANNOUNCEMENT", "DELETE_ANNOUNCEMENT", "CREATE_LIVE", "EDIT_LIVE",
-                         "START_LIVE", "END_LIVE", "MODERATE_LIVE", "VIEW_ANALYTICS", "MANAGE_EXTERNAL_MEDIA",
-                         "MANAGE_LIVE", "MANAGE_CAMERA", "MANAGE_MICROPHONE", "MANAGE_SCENES",
-                         "MANAGE_SOURCES", "VIEW_LIVE_ANALYTICS"]
-    fdoc = await db.users.find_one({"email": "formador@caminho.app"})
-    if fdoc and not fdoc.get("permissions"):
-        await db.users.update_one({"id": fdoc["id"]}, {"$set": {"permissions": demo_former_perms}})
-    else:
-        missing = [p for p in demo_former_perms if p not in (fdoc.get("permissions") or [])] if fdoc else []
-        if missing:
-            await db.users.update_one({"id": fdoc["id"]}, {"$addToSet": {"permissions": {"$each": missing}}})
+    # Permissões: garante o campo em todos os usuários.
+    # Esta correção estrutural não depende dos usuários demo.
+    await db.users.update_many(
+        {"permissions": {"$exists": False}},
+        {"$set": {"permissions": []}}
+    )
 
-    # demo formador
-    former = await db.users.find_one({"email": "formador@caminho.app"})
-    if not former:
-        fid = str(uuid.uuid4())
-        await db.users.insert_one({"id": fid, "name": "Maria Formadora", "email": "formador@caminho.app",
-                                   "password_hash": hash_password("***REMOVED***"), "role": "formador",
-                                   "current_stage_order": 6, "formador_id": None, "onboarded": True,
-                                   "blocked": False, "avatar": None, "created_at": now_iso(), "last_active": now_iso()})
-    else:
-        fid = former["id"]
+    # Usuários e permissões de demonstração.
+    # DESATIVADO por padrão.
+    # Ativar somente em ambiente de desenvolvimento/testes controlados
+    # através de SEED_DEMO_USERS=true.
+    if seed_demo_users:
+        demo_password = os.environ["DEMO_USER_PASSWORD"]
 
-    # demo membro
-    membro = await db.users.find_one({"email": "membro@caminho.app"})
-    if not membro:
-        mid = str(uuid.uuid4())
-        await db.users.insert_one({"id": mid, "name": "João Membro", "email": "membro@caminho.app",
-                                   "password_hash": hash_password("***REMOVED***"), "role": "membro",
-                                   "current_stage_order": 3, "formador_id": fid, "onboarded": True,
-                                   "blocked": False, "avatar": None, "created_at": now_iso(),
-                                   "last_active": (datetime.now(timezone.utc) - timedelta(days=6)).isoformat()})
+        demo_former_perms = [
+            "CREATE_COURSE",
+            "EDIT_COURSE",
+            "CREATE_MODULE",
+            "CREATE_LESSON",
+            "EDIT_LESSON",
+            "PUBLISH_LESSON",
+            "UPLOAD_VIDEO",
+            "UPLOAD_AUDIO",
+            "UPLOAD_DOCUMENT",
+            "CREATE_ANNOUNCEMENT",
+            "DELETE_ANNOUNCEMENT",
+            "CREATE_LIVE",
+            "EDIT_LIVE",
+            "START_LIVE",
+            "END_LIVE",
+            "MODERATE_LIVE",
+            "VIEW_ANALYTICS",
+            "MANAGE_EXTERNAL_MEDIA",
+            "MANAGE_LIVE",
+            "MANAGE_CAMERA",
+            "MANAGE_MICROPHONE",
+            "MANAGE_SCENES",
+            "MANAGE_SOURCES",
+            "VIEW_LIVE_ANALYTICS",
+        ]
 
-    # demo users: one per stage (item 59) — all vinculados ao formador
-    stage_users = [
-        ("prevocacionado@caminho.app", "Ana Pré-Vocacionada", 1, 0),
-        ("vocacionado@caminho.app", "Pedro Vocacionado", 2, 1),
-        ("discipulo2@caminho.app", "Tiago Discípulo II", 4, 12),
-        ("compromissado@caminho.app", "Clara Compromissada", 5, 3),
-        ("consagrado@caminho.app", "Lucas Consagrado", 6, 2),
-    ]
-    for email, name, order, inactive_days in stage_users:
-        if not await db.users.find_one({"email": email}):
-            await db.users.insert_one({"id": str(uuid.uuid4()), "name": name, "email": email,
-                                       "password_hash": hash_password("***REMOVED***"), "role": "membro",
-                                       "current_stage_order": order, "formador_id": fid, "onboarded": True,
-                                       "blocked": False, "avatar": None, "created_at": now_iso(),
-                                       "last_active": (datetime.now(timezone.utc) - timedelta(days=inactive_days)).isoformat()})
+        # Demo formador
+        former = await db.users.find_one(
+            {"email": "formador@caminho.app"}
+        )
 
-    # demo FORMADOR GERAL + vínculo do formador e membros (escopo de responsabilidade)
-    geral = await db.users.find_one({"email": "geral@caminho.app"})
-    if not geral:
-        gid = str(uuid.uuid4())
-        await db.users.insert_one({"id": gid, "name": "Pe. João (Formador Geral)", "email": "geral@caminho.app",
-            "password_hash": hash_password("***REMOVED***"), "role": "formador_geral",
-            "current_stage_order": 4, "formation_stage": "DISCIPULO", "formation_year": 2, "formation_status": "ATIVO",
-            "formador_id": None, "general_formador_id": None, "permissions": [], "onboarded": True, "blocked": False,
-            "avatar": None, "created_at": now_iso(), "last_active": now_iso()})
-        geral = await db.users.find_one({"id": gid})
-    elif geral.get("role") != "formador_geral":
-        await db.users.update_one({"id": geral["id"]}, {"$set": {"role": "formador_geral", "formation_status": "ATIVO"}})
-        geral = await db.users.find_one({"id": geral["id"]})
-    fd2 = await db.users.find_one({"email": "formador@caminho.app"})
-    if fd2 and not fd2.get("general_formador_id"):
-        await db.users.update_one({"id": fd2["id"]}, {"$set": {"general_formador_id": geral["id"]}})
-    if fd2:
-        await db.users.update_many({"role": "membro", "$or": [{"formador_id": None}, {"formador_id": {"$exists": False}}]},
-                                   {"$set": {"formador_id": fd2["id"]}})
+        if not former:
+            fid = str(uuid.uuid4())
+
+            await db.users.insert_one({
+                "id": fid,
+                "name": "Maria Formadora",
+                "email": "formador@caminho.app",
+                "password_hash": hash_password(demo_password),
+                "role": "formador",
+                "current_stage_order": 6,
+                "formation_stage": _formador_stage,
+                "formation_year": _formador_year,
+                "formation_status": "ATIVO",
+                "general_formador_id": None,
+                "formador_id": None,
+                "permissions": demo_former_perms,
+                "onboarded": True,
+                "blocked": False,
+                "avatar": None,
+                "created_at": now_iso(),
+                "last_active": now_iso(),
+            })
+        else:
+            fid = former["id"]
+
+        # Demo membro
+        membro = await db.users.find_one(
+            {"email": "membro@caminho.app"}
+        )
+        if not membro:
+            mid = str(uuid.uuid4())
+            _membro_stage, _membro_year = FORMATION_META.get(
+                3,
+                ("PRE_VOCACIONADO", None),
+            )
+
+            await db.users.insert_one({
+                "id": mid,
+                "name": "João Membro",
+                "email": "membro@caminho.app",
+                "password_hash": hash_password(demo_password),
+                "role": "membro",
+                "current_stage_order": 3,
+                "formation_stage": _membro_stage,
+                "formation_year": _membro_year,
+                "formation_status": "EM_FORMACAO",
+                "general_formador_id": None,
+                "formador_id": fid,
+                "onboarded": True,
+                "blocked": False,
+                "avatar": None,
+                "created_at": now_iso(),
+                "last_active": (
+                    datetime.now(timezone.utc)
+                    - timedelta(days=6)
+                ).isoformat(),
+            })
+
+        # Usuários demo, um por etapa.
+        # Somente criados quando SEED_DEMO_USERS=true.
+        stage_users = [
+            (
+                "prevocacionado@caminho.app",
+                "Ana Pré-Vocacionada",
+                1,
+                0,
+            ),
+            (
+                "vocacionado@caminho.app",
+                "Pedro Vocacionado",
+                2,
+                1,
+            ),
+            (
+                "discipulo2@caminho.app",
+                "Tiago Discípulo II",
+                4,
+                12,
+            ),
+            (
+                "compromissado@caminho.app",
+                "Clara Compromissada",
+                5,
+                3,
+            ),
+            (
+                "consagrado@caminho.app",
+                "Lucas Consagrado",
+                6,
+                2,
+            ),
+        ]
+
+        for email, name, order, inactive_days in stage_users:
+            existing_user = await db.users.find_one(
+                {"email": email}
+            )
+
+            if not existing_user:
+                _stage, _year = FORMATION_META.get(
+                    order,
+                    ("PRE_VOCACIONADO", None),
+                )
+
+                await db.users.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "name": name,
+                    "email": email,
+                    "password_hash": hash_password(demo_password),
+                    "role": "membro",
+                    "current_stage_order": order,
+                    "formation_stage": _stage,
+                    "formation_year": _year,
+                    "formation_status": "EM_FORMACAO",
+                    "general_formador_id": None,
+                    "permissions": [],
+                    "formador_id": fid,
+                    "onboarded": True,
+                    "blocked": False,
+                    "avatar": None,
+                    "created_at": now_iso(),
+                    "last_active": (
+                        datetime.now(timezone.utc)
+                        - timedelta(days=inactive_days)
+                    ).isoformat(),
+                })
+        # Demo FORMADOR GERAL + vínculo do formador e membros.
+        geral = await db.users.find_one(
+            {"email": "geral@caminho.app"}
+        )
+
+        if not geral:
+            gid = str(uuid.uuid4())
+
+            await db.users.insert_one({
+                "id": gid,
+                "name": "Pe. João (Formador Geral)",
+                "email": "geral@caminho.app",
+                "password_hash": hash_password(demo_password),
+                "role": "formador_geral",
+                "current_stage_order": 4,
+                "formation_stage": "DISCIPULO",
+                "formation_year": 2,
+                "formation_status": "ATIVO",
+                "formador_id": None,
+                "general_formador_id": None,
+                "permissions": [],
+                "onboarded": True,
+                "blocked": False,
+                "avatar": None,
+                "created_at": now_iso(),
+                "last_active": now_iso(),
+            })
+
+            geral = await db.users.find_one(
+                {"id": gid}
+            )
 
 @app.on_event("startup")
-async def on_startup():
+async def startup_event():
     await seed()
 
 app.include_router(api)
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
 logging.basicConfig(level=logging.INFO)
 
 @app.on_event("shutdown")
